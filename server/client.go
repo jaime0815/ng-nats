@@ -63,8 +63,6 @@ const (
 	NATS
 	// MQTT client.
 	MQTT
-	// Websocket client.
-	WS
 )
 
 const (
@@ -261,7 +259,6 @@ type client struct {
 	route *route
 	gw    *gateway
 	leaf  *leaf
-	ws    *websocket
 	mqtt  *mqtt
 
 	flags clientFlag // Compact booleans into a single field. Size will be increased when needed.
@@ -475,7 +472,7 @@ func (c *client) GetTLSConnectionState() *tls.ConnectionState {
 }
 
 // For CLIENT connections, this function returns the client type, that is,
-// NATS (for regular clients), MQTT or WS for websocket.
+// NATS (for regular clients), MQTT for websocket.
 // If this is invoked for a non CLIENT connection, NON_CLIENT is returned.
 //
 // This function does not lock the client and accesses fields that are supposed
@@ -485,8 +482,6 @@ func (c *client) clientType() int {
 	case CLIENT:
 		if c.isMqtt() {
 			return MQTT
-		} else if c.isWebsocket() {
-			return WS
 		}
 		return NATS
 	default:
@@ -497,7 +492,6 @@ func (c *client) clientType() int {
 var clientTypeStringMap = map[int]string{
 	NON_CLIENT: _EMPTY_,
 	NATS:       "nats",
-	WS:         "websocket",
 	MQTT:       "mqtt",
 }
 
@@ -621,15 +615,6 @@ func (c *client) initClient() {
 				host, port, _ := net.SplitHostPort(conn)
 				iPort, _ := strconv.Atoi(port)
 				c.host, c.port = host, uint16(iPort)
-				if c.isWebsocket() && c.ws.clientIP != _EMPTY_ {
-					cip := c.ws.clientIP
-					// Surround IPv6 addresses with square brackets, as
-					// net.JoinHostPort would do...
-					if strings.Contains(cip, ":") {
-						cip = "[" + cip + "]"
-					}
-					conn = fmt.Sprintf("%s/%s", cip, conn)
-				}
 				// Now that we have extracted host and port, escape
 				// the string because it is going to be used in Sprintf
 				conn = strings.ReplaceAll(conn, "%", "%%")
@@ -642,25 +627,15 @@ func (c *client) initClient() {
 		switch c.clientType() {
 		case NATS:
 			c.ncs.Store(fmt.Sprintf("%s - cid:%d", conn, c.cid))
-		case WS:
-			c.ncs.Store(fmt.Sprintf("%s - wid:%d", conn, c.cid))
 		case MQTT:
-			var ws string
-			if c.isWebsocket() {
-				ws = "_ws"
-			}
-			c.ncs.Store(fmt.Sprintf("%s - mid%s:%d", conn, ws, c.cid))
+			c.ncs.Store(fmt.Sprintf("%s - mid%s:%d", conn, "", c.cid))
 		}
 	case ROUTER:
 		c.ncs.Store(fmt.Sprintf("%s - rid:%d", conn, c.cid))
 	case GATEWAY:
 		c.ncs.Store(fmt.Sprintf("%s - gid:%d", conn, c.cid))
 	case LEAF:
-		var ws string
-		if c.isWebsocket() {
-			ws = "_ws"
-		}
-		c.ncs.Store(fmt.Sprintf("%s - lid%s:%d", conn, ws, c.cid))
+		c.ncs.Store(fmt.Sprintf("%s - lid%s:%d", conn, "", c.cid))
 	case SYSTEM:
 		c.ncs.Store("SYSTEM")
 	case JETSTREAM:
@@ -1142,7 +1117,6 @@ func (c *client) readLoop(pre []byte) {
 		return
 	}
 	nc := c.nc
-	ws := c.isWebsocket()
 	if c.isMqtt() {
 		c.mqtt.r = &mqttReader{reader: nc}
 	}
@@ -1153,10 +1127,6 @@ func (c *client) readLoop(pre []byte) {
 	// Last per-account-cache check for closed subscriptions
 	lpacc := time.Now()
 	acc := c.acc
-	var masking bool
-	if ws {
-		masking = c.ws.maskread
-	}
 	c.mu.Unlock()
 
 	defer func() {
@@ -1178,12 +1148,6 @@ func (c *client) readLoop(pre []byte) {
 	var _bufs [1][]byte
 	bufs := _bufs[:1]
 
-	var wsr *wsReadInfo
-	if ws {
-		wsr = &wsReadInfo{mask: masking}
-		wsr.init()
-	}
-
 	for {
 		var n int
 		var err error
@@ -1201,19 +1165,8 @@ func (c *client) readLoop(pre []byte) {
 				return
 			}
 		}
-		if ws {
-			bufs, err = c.wsRead(wsr, nc, b[:n])
-			if bufs == nil && err != nil {
-				if err != io.EOF {
-					c.Errorf("read error: %v", err)
-				}
-				c.closeConnection(closedStateForErr(err))
-			} else if bufs == nil {
-				continue
-			}
-		} else {
-			bufs[0] = b[:n]
-		}
+
+		bufs[0] = b[:n]
 
 		// Check if the account has mappings and if so set the local readcache flag.
 		// We check here to make sure any changes such as config reload are reflected here.
@@ -1341,9 +1294,6 @@ func closedStateForErr(err error) ClosedState {
 // collapsePtoNB will place primary onto nb buffer as needed in prep for WriteTo.
 // This will return a copy on purpose.
 func (c *client) collapsePtoNB() (net.Buffers, int64) {
-	if c.isWebsocket() {
-		return c.wsCollapsePtoNB()
-	}
 	if c.out.p != nil {
 		p := c.out.p
 		c.out.p = nil
@@ -1355,10 +1305,6 @@ func (c *client) collapsePtoNB() (net.Buffers, int64) {
 // This will handle the fixup needed on a partial write.
 // Assume pending has been already calculated correctly.
 func (c *client) handlePartialWrite(pnb net.Buffers) {
-	if c.isWebsocket() {
-		c.ws.frames = append(pnb, c.ws.frames...)
-		return
-	}
 	nb, _ := c.collapsePtoNB()
 	// The partial needs to be first, so append nb to pnb
 	c.out.nb = append(pnb, nb...)
@@ -1449,9 +1395,7 @@ func (c *client) flushOutbound() bool {
 
 	// Subtract from pending bytes and messages.
 	c.out.pb -= n
-	if c.isWebsocket() {
-		c.ws.fs -= n
-	}
+
 	c.out.pm -= apm // FIXME(dlc) - this will not be totally accurate on partials.
 
 	// Check for partial writes
@@ -1559,21 +1503,14 @@ func (c *client) markConnAsClosed(reason ClosedState) {
 	// the flushOutbound() gets a write error. If that happens, connection
 	// being lost, there is no reason to attempt to flush again during the
 	// teardown when the writeLoop exits.
-	var skipFlush bool
 	switch reason {
 	case ReadError, WriteError, SlowConsumerPendingBytes, SlowConsumerWriteDeadline, TLSHandshakeError:
 		c.flags.set(skipFlushOnClose)
-		skipFlush = true
 	}
 	if c.flags.isSet(connMarkedClosed) {
 		return
 	}
 	c.flags.set(connMarkedClosed)
-	// For a websocket client, unless we are told not to flush, enqueue
-	// a websocket CloseMessage based on the reason.
-	if !skipFlush && c.isWebsocket() && !c.ws.closeSent {
-		c.wsEnqueueCloseMessage(reason)
-	}
 	// Be consistent with the creation: for routes, gateways and leaf,
 	// we use Noticef on create, so use that too for delete.
 	if c.srv != nil {
@@ -1805,10 +1742,6 @@ func (c *client) processConnect(arg []byte) error {
 		}
 	}
 
-	// If websocket client and JWT not in the CONNECT, use the cookie JWT (possibly empty).
-	if ws := c.ws; ws != nil && c.opts.JWT == "" {
-		c.opts.JWT = ws.cookieJwt
-	}
 	// when not in operator mode, discard the jwt
 	if srv != nil && srv.trustedKeys == nil {
 		c.opts.JWT = _EMPTY_
@@ -2142,10 +2075,6 @@ func (c *client) generateClientInfoJSON(info Info) []byte {
 	info.CID = c.cid
 	info.ClientIP = c.host
 	info.MaxPayload = c.mpay
-	if c.isWebsocket() {
-		info.ClientConnectURLs = info.WSConnectURLs
-	}
-	info.WSConnectURLs = nil
 	// Generate the info json
 	b, _ := json.Marshal(info)
 	pcs := [][]byte{[]byte("INFO"), b, []byte(CR_LF)}
@@ -4863,7 +4792,7 @@ func (c *client) closeConnection(reason ClosedState) {
 		// the updated list of connect URLs to clients that know how to
 		// handle async INFOs.
 		if (len(connectURLs) > 0 || len(wsConnectURLs) > 0) && !srv.getOpts().Cluster.NoAdvertise {
-			srv.removeConnectURLsAndSendINFOToClients(connectURLs, wsConnectURLs)
+			srv.removeConnectURLsAndSendINFOToClients(connectURLs)
 		}
 
 		// Unregister
@@ -5371,21 +5300,13 @@ func (c *client) connectionTypeAllowed(acts map[string]struct{}) bool {
 		switch c.clientType() {
 		case NATS:
 			want = jwt.ConnectionTypeStandard
-		case WS:
-			want = jwt.ConnectionTypeWebsocket
+
 		case MQTT:
-			if c.isWebsocket() {
-				want = jwt.ConnectionTypeMqttWS
-			} else {
-				want = jwt.ConnectionTypeMqtt
-			}
+			want = jwt.ConnectionTypeMqtt
+
 		}
 	case LEAF:
-		if c.isWebsocket() {
-			want = jwt.ConnectionTypeLeafnodeWS
-		} else {
-			want = jwt.ConnectionTypeLeafnode
-		}
+		want = jwt.ConnectionTypeLeafnode
 	}
 	_, ok := acts[want]
 	return ok

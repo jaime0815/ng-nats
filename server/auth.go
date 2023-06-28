@@ -29,9 +29,10 @@ import (
 	"time"
 
 	"github.com/nats-io/jwt/v2"
-	"github.com/nats-io/nats-server/v2/internal/ldap"
 	"github.com/nats-io/nkeys"
 	"golang.org/x/crypto/bcrypt"
+
+	"github.com/nats-io/nats-server/v2/internal/ldap"
 )
 
 // Authentication is an interface for implementing authentication
@@ -261,8 +262,6 @@ func (s *Server) configureAuthorization() {
 		s.info.AuthRequired = false
 	}
 
-	// Do similar for websocket config
-	s.wsConfigAuth(&opts.Websocket)
 	// And for mqtt config
 	s.mqttConfigAuth(&opts.MQTT)
 }
@@ -556,8 +555,6 @@ func (s *Server) processClientOrLeafAuthentication(c *client, opts *Options) boo
 		switch c.clientType() {
 		case MQTT:
 			authRequired = s.mqtt.authOverride
-		case WS:
-			authRequired = s.websocket.authOverride
 		}
 	}
 	if !authRequired {
@@ -588,19 +585,6 @@ func (s *Server) processClientOrLeafAuthentication(c *client, opts *Options) boo
 				token = mo.Token
 				ao = true
 			}
-		case WS:
-			wo := &opts.Websocket
-			// Always override TLSMap.
-			tlsMap = wo.TLSMap
-			// The rest depends on if there was any auth override in
-			// the websocket's config.
-			if s.websocket.authOverride {
-				noAuthUser = wo.NoAuthUser
-				username = wo.Username
-				password = wo.Password
-				token = wo.Token
-				ao = true
-			}
 		}
 	} else {
 		tlsMap = opts.LeafNode.TLSMap
@@ -608,11 +592,6 @@ func (s *Server) processClientOrLeafAuthentication(c *client, opts *Options) boo
 
 	if !ao {
 		noAuthUser = opts.NoAuthUser
-		// If a leaf connects using websocket, and websocket{} block has a no_auth_user
-		// use that one instead.
-		if c.kind == LEAF && c.isWebsocket() && opts.Websocket.NoAuthUser != _EMPTY_ {
-			noAuthUser = opts.Websocket.NoAuthUser
-		}
 		username = opts.Username
 		password = opts.Password
 		token = opts.Authorization

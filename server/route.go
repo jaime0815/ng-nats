@@ -557,22 +557,16 @@ func (c *client) processRouteInfo(info *Info) {
 		var connectURLs []string
 		var wsConnectURLs []string
 
-		// If we are notified that the remote is going into LDM mode, capture route's connectURLs.
-		if info.LameDuckMode {
-			connectURLs = c.route.connectURLs
-			wsConnectURLs = c.route.wsConnURLs
-		} else {
-			// If this is an update due to config reload on the remote server,
-			// need to possibly send local subs to the remote server.
-			c.updateRemoteRoutePerms(sl, info)
-		}
+		// If this is an update due to config reload on the remote server,
+		// need to possibly send local subs to the remote server.
+		c.updateRemoteRoutePerms(sl, info)
 		c.mu.Unlock()
 
 		// If the remote is going into LDM and there are client connect URLs
 		// associated with this route and we are allowed to advertise, remove
 		// those URLs and update our clients.
 		if (len(connectURLs) > 0 || len(wsConnectURLs) > 0) && !s.getOpts().Cluster.NoAdvertise {
-			s.removeConnectURLsAndSendINFOToClients(connectURLs, wsConnectURLs)
+			s.removeConnectURLsAndSendINFOToClients(connectURLs)
 		}
 		return
 	}
@@ -672,7 +666,7 @@ func (c *client) processRouteInfo(info *Info) {
 		// Unless disabled, possibly update the server's INFO protocol
 		// and send to clients that know how to handle async INFOs.
 		if !s.getOpts().Cluster.NoAdvertise {
-			s.addConnectURLsAndSendINFOToClients(info.ClientConnectURLs, info.WSConnectURLs)
+			s.addConnectURLsAndSendINFOToClients(info.ClientConnectURLs)
 		}
 		// Add the remote's leafnodeURL to our list of URLs and send the update
 		// to all LN connections. (Note that when coming from a route, LeafNodeURLs
@@ -726,7 +720,7 @@ func (c *client) updateRemoteRoutePerms(sl *Sublist, info *Info) {
 // sendAsyncInfoToClients sends an INFO protocol to all
 // connected clients that accept async INFO updates.
 // The server lock is held on entry.
-func (s *Server) sendAsyncInfoToClients(regCli, wsCli bool) {
+func (s *Server) sendAsyncInfoToClients(regCli bool) {
 	// If there are no clients supporting async INFO protocols, we are done.
 	// Also don't send if we are shutting down...
 	if s.cproto == 0 || s.shutdown {
@@ -740,9 +734,7 @@ func (s *Server) sendAsyncInfoToClients(regCli, wsCli bool) {
 		// registered (server has received CONNECT and first PING). For
 		// clients that are not at this stage, this will happen in the
 		// processing of the first PING (see client.processPing)
-		if ((regCli && !c.isWebsocket()) || (wsCli && c.isWebsocket())) &&
-			c.opts.Protocol >= ClientProtoInfo &&
-			c.flags.isSet(firstPongSent) {
+		if regCli && c.opts.Protocol >= ClientProtoInfo && c.flags.isSet(firstPongSent) {
 			// sendInfo takes care of checking if the connection is still
 			// valid or not, so don't duplicate tests here.
 			c.enqueueProto(c.generateClientInfoJSON(info))
@@ -1430,7 +1422,6 @@ func (s *Server) addRoute(c *client, info *Info) (bool, bool) {
 		}
 		c.mu.Lock()
 		c.route.connectURLs = info.ClientConnectURLs
-		c.route.wsConnURLs = info.WSConnectURLs
 		cid := c.cid
 		hash := c.route.hash
 		idHash := c.route.idHash
@@ -1705,7 +1696,6 @@ func (s *Server) startRouteAcceptLoop() {
 	// Set this if only if advertise is not disabled
 	if !opts.Cluster.NoAdvertise {
 		info.ClientConnectURLs = s.clientConnectURLs
-		info.WSConnectURLs = s.websocket.connectURLs
 	}
 	// If we have selected a random port...
 	if port == 0 {

@@ -350,10 +350,8 @@ func (c *clusterOption) Apply(s *Server) {
 	s.routeInfo.AuthRequired = c.newValue.Username != ""
 	if c.newValue.NoAdvertise {
 		s.routeInfo.ClientConnectURLs = nil
-		s.routeInfo.WSConnectURLs = nil
 	} else {
 		s.routeInfo.ClientConnectURLs = s.clientConnectURLs
-		s.routeInfo.WSConnectURLs = s.websocket.connectURLs
 	}
 	s.setRouteInfoHostPortAndIP()
 	s.mu.Unlock()
@@ -720,9 +718,6 @@ func (s *Server) recheckPinnedCerts(curOpts *Options, newOpts *Options) {
 	}
 	if !reflect.DeepEqual(newOpts.MQTT.TLSPinnedCerts, curOpts.MQTT.TLSPinnedCerts) {
 		protoToPinned[MQTT] = curOpts.MQTT.TLSPinnedCerts
-	}
-	if !reflect.DeepEqual(newOpts.Websocket.TLSPinnedCerts, curOpts.Websocket.TLSPinnedCerts) {
-		protoToPinned[WS] = curOpts.Websocket.TLSPinnedCerts
 	}
 	for _, c := range s.clients {
 		if c.kind != CLIENT {
