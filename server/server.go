@@ -236,9 +236,6 @@ type Server struct {
 	// For eventIDs
 	eventIds *nuid.NUID
 
-	// MQTT structure
-	mqtt srvMQTT
-
 	// OCSP monitoring
 	ocsps []*OCSPMonitor
 
@@ -703,9 +700,7 @@ func validateOptions(o *Options) error {
 	if err := validateCluster(o); err != nil {
 		return err
 	}
-	if err := validateMQTTOptions(o); err != nil {
-		return err
-	}
+
 	if err := validateJetStreamOptions(o); err != nil {
 		return err
 	}
@@ -1839,11 +1834,6 @@ func (s *Server) Start() {
 	// port to be opened and potential ephemeral port selected.
 	clientListenReady := make(chan struct{})
 
-	// MQTT
-	if opts.MQTT.Port != 0 {
-		s.startMQTT()
-	}
-
 	// Start up routing as well if needed.
 	if opts.Cluster.Port != 0 {
 		s.startGoRoutine(func() {
@@ -1950,13 +1940,6 @@ func (s *Server) Shutdown() {
 		doneExpected++
 		s.listener.Close()
 		s.listener = nil
-	}
-
-	// Kick MQTT accept loop
-	if s.mqtt.listener != nil {
-		doneExpected++
-		s.mqtt.listener.Close()
-		s.mqtt.listener = nil
 	}
 
 	// Kick leafnodes AcceptLoop()
@@ -2964,7 +2947,6 @@ func (s *Server) readyForConnections(d time.Duration) error {
 		chk["route"] = info{ok: (opts.Cluster.Port == 0 || s.routeListener != nil), err: s.routeListenerErr}
 		chk["gateway"] = info{ok: (opts.Gateway.Name == _EMPTY_ || s.gatewayListener != nil), err: s.gatewayListenerErr}
 		chk["leafNode"] = info{ok: (opts.LeafNode.Port == 0 || s.leafNodeListener != nil), err: s.leafNodeListenerErr}
-		chk["mqtt"] = info{ok: (opts.MQTT.Port == 0 || s.mqtt.listener != nil), err: s.mqtt.listenerErr}
 		s.mu.RUnlock()
 
 		var numOK int

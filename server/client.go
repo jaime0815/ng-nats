@@ -61,8 +61,6 @@ const (
 	NON_CLIENT = iota
 	// Regular NATS client.
 	NATS
-	// MQTT client.
-	MQTT
 )
 
 const (
@@ -259,7 +257,6 @@ type client struct {
 	route *route
 	gw    *gateway
 	leaf  *leaf
-	mqtt  *mqtt
 
 	flags clientFlag // Compact booleans into a single field. Size will be increased when needed.
 
@@ -480,9 +477,6 @@ func (c *client) GetTLSConnectionState() *tls.ConnectionState {
 func (c *client) clientType() int {
 	switch c.kind {
 	case CLIENT:
-		if c.isMqtt() {
-			return MQTT
-		}
 		return NATS
 	default:
 		return NON_CLIENT
@@ -492,7 +486,6 @@ func (c *client) clientType() int {
 var clientTypeStringMap = map[int]string{
 	NON_CLIENT: _EMPTY_,
 	NATS:       "nats",
-	MQTT:       "mqtt",
 }
 
 func (c *client) clientTypeString() string {
@@ -521,7 +514,6 @@ type subscription struct {
 	max     int64
 	qw      int32
 	closed  int32
-	mqtt    *mqttSub
 }
 
 // Indicate that this subscription is closed.
@@ -627,8 +619,6 @@ func (c *client) initClient() {
 		switch c.clientType() {
 		case NATS:
 			c.ncs.Store(fmt.Sprintf("%s - cid:%d", conn, c.cid))
-		case MQTT:
-			c.ncs.Store(fmt.Sprintf("%s - mid%s:%d", conn, "", c.cid))
 		}
 	case ROUTER:
 		c.ncs.Store(fmt.Sprintf("%s - rid:%d", conn, c.cid))
@@ -1117,9 +1107,7 @@ func (c *client) readLoop(pre []byte) {
 		return
 	}
 	nc := c.nc
-	if c.isMqtt() {
-		c.mqtt.r = &mqttReader{reader: nc}
-	}
+
 	c.in.rsz = startBufSize
 
 	// Check the per-account-cache for closed subscriptions
@@ -1130,9 +1118,6 @@ func (c *client) readLoop(pre []byte) {
 	c.mu.Unlock()
 
 	defer func() {
-		if c.isMqtt() {
-			s.mqttHandleClosedClient(c)
-		}
 		// These are used only in the readloop, so we can set them to nil
 		// on exit of the readLoop.
 		c.in.results, c.in.pacache = nil, nil
@@ -1880,11 +1865,7 @@ func (c *client) authViolation() {
 	} else {
 		c.Errorf(ErrAuthentication.Error())
 	}
-	if c.isMqtt() {
-		c.mqttEnqueueConnAck(mqttConnAckRCNotAuthorized, false)
-	} else {
-		c.sendErr("Authorization Violation")
-	}
+	c.sendErr("Authorization Violation")
 	c.closeConnection(AuthenticationViolation)
 }
 
@@ -2042,9 +2023,6 @@ func (c *client) sendRTTPing() bool {
 // the c.rtt is 0 and wants to force an update by sending a PING.
 // Client lock held on entry.
 func (c *client) sendRTTPingLocked() bool {
-	if c.isMqtt() {
-		return false
-	}
 	// Most client libs send a CONNECT+PING and wait for a PONG from the
 	// server. So if firstPongSent flag is set, it is ok for server to
 	// send the PING. But in case we have client libs that don't do that,
@@ -2085,9 +2063,6 @@ func (c *client) sendErr(err string) {
 	c.mu.Lock()
 	if c.trace {
 		c.traceOutOp("-ERR", []byte(err))
-	}
-	if !c.isMqtt() {
-		c.enqueueProto([]byte(fmt.Sprintf(errProto, err)))
 	}
 	c.mu.Unlock()
 }
@@ -3013,7 +2988,7 @@ var needFlush = struct{}{}
 
 // deliverMsg will deliver a message to a matching subscription and its underlying client.
 // We process all connection/client types. mh is the part that will be protocol/client specific.
-func (c *client) deliverMsg(prodIsMQTT bool, sub *subscription, acc *Account, subject, reply, mh, msg []byte, gwrply bool) bool {
+func (c *client) deliverMsg(sub *subscription, acc *Account, subject, reply, mh, msg []byte, gwrply bool) bool {
 	if sub.client == nil {
 		return false
 	}
@@ -3096,10 +3071,6 @@ func (c *client) deliverMsg(prodIsMQTT bool, sub *subscription, acc *Account, su
 
 	// The msg includes the CR_LF, so pull back out for accounting.
 	msgSize := int64(len(msg))
-	// MQTT producers send messages without CR_LF, so don't remove it for them.
-	if !prodIsMQTT {
-		msgSize -= int64(LEN_CR_LF)
-	}
 
 	// No atomic needed since accessed under client lock.
 	// Monitor is reading those also under client's lock.
@@ -3173,10 +3144,6 @@ func (c *client) deliverMsg(prodIsMQTT bool, sub *subscription, acc *Account, su
 	// Queue to outbound buffer
 	client.queueOutbound(mh)
 	client.queueOutbound(msg)
-	if prodIsMQTT {
-		// Need to add CR_LF since MQTT producers don't send CR_LF
-		client.queueOutbound([]byte(CR_LF))
-	}
 
 	client.out.pm++
 
@@ -3489,11 +3456,6 @@ func (c *client) processInboundClientMsg(msg []byte) (bool, bool) {
 		c.sendOK()
 	}
 
-	// If MQTT client, check for retain flag now that we have passed permissions check
-	if c.isMqtt() {
-		c.mqttHandlePubRetain()
-	}
-
 	// Doing this inline as opposed to create a function (which otherwise has a measured
 	// performance impact reported in our bench)
 	var isGWRouted bool
@@ -3725,10 +3687,7 @@ func (c *client) setHeader(key, value string, msg []byte) []byte {
 	// FIXME(dlc) - This is inefficient.
 	bb.Write(msg[omi:])
 	nsize := bb.Len() - LEN_CR_LF
-	// MQTT producers don't have CRLF, so add it back.
-	if c.isMqtt() {
-		nsize += LEN_CR_LF
-	}
+
 	// Update pubArgs
 	// If others will use this later we need to save and restore original.
 	c.pa.hdr = nhdr
@@ -3917,10 +3876,6 @@ func (c *client) processServiceImport(si *serviceImport, acc *Account, msg []byt
 	}
 	c.pa.reply = nrr
 
-	if changed && c.isMqtt() && c.pa.hdr > 0 {
-		c.srv.mqttStoreQoS1MsgForAccountOnNewSubject(c.pa.hdr, msg, si.acc.GetName(), to)
-	}
-
 	// FIXME(dlc) - Do L1 cache trick like normal client?
 	rr := si.acc.sl.Match(to)
 
@@ -4080,19 +4035,12 @@ func (c *client) processMsgResults(acc *Account, r *SublistResult, msg, deliver,
 	var dlvMsgs int64
 	var dlvExtraSize int64
 
-	// We need to know if this is a MQTT producer because they send messages
-	// without CR_LF (we otherwise remove the size of CR_LF from message size).
-	prodIsMQTT := c.isMqtt()
-
 	updateStats := func() {
 		if dlvMsgs == 0 {
 			return
 		}
 		totalBytes := dlvMsgs*int64(len(msg)) + dlvExtraSize
-		// For non MQTT producers, remove the CR_LF * number of messages
-		if !prodIsMQTT {
-			totalBytes -= dlvMsgs * int64(LEN_CR_LF)
-		}
+
 		if acc != nil {
 			atomic.AddInt64(&acc.outMsgs, dlvMsgs)
 			atomic.AddInt64(&acc.outBytes, totalBytes)
@@ -4165,7 +4113,7 @@ func (c *client) processMsgResults(acc *Account, r *SublistResult, msg, deliver,
 
 		// Normal delivery
 		mh := c.msgHeader(dsubj, creply, sub)
-		if c.deliverMsg(prodIsMQTT, sub, acc, dsubj, creply, mh, msg, rplyHasGWPrefix) {
+		if c.deliverMsg(sub, acc, dsubj, creply, mh, msg, rplyHasGWPrefix) {
 			// We don't count internal deliveries, so do only when sub.icb is nil.
 			if sub.icb == nil {
 				dlvMsgs++
@@ -4305,7 +4253,7 @@ func (c *client) processMsgResults(acc *Account, r *SublistResult, msg, deliver,
 			}
 
 			mh := c.msgHeader(dsubj, creply, sub)
-			if c.deliverMsg(prodIsMQTT, sub, acc, subject, creply, mh, msg, rplyHasGWPrefix) {
+			if c.deliverMsg(sub, acc, subject, creply, mh, msg, rplyHasGWPrefix) {
 				if sub.icb == nil {
 					dlvMsgs++
 				}
@@ -4386,7 +4334,7 @@ sendToRoutesOrLeafs:
 		}
 
 		mh := c.msgHeaderForRouteOrLeaf(subject, reply, rt, acc)
-		if c.deliverMsg(prodIsMQTT, rt.sub, acc, subject, reply, mh, dmsg, false) {
+		if c.deliverMsg(rt.sub, acc, subject, reply, mh, dmsg, false) {
 			if rt.sub.icb == nil {
 				dlvMsgs++
 				dlvExtraSize += int64(len(dmsg) - len(msg))
@@ -5300,10 +5248,6 @@ func (c *client) connectionTypeAllowed(acts map[string]struct{}) bool {
 		switch c.clientType() {
 		case NATS:
 			want = jwt.ConnectionTypeStandard
-
-		case MQTT:
-			want = jwt.ConnectionTypeMqtt
-
 		}
 	case LEAF:
 		want = jwt.ConnectionTypeLeafnode

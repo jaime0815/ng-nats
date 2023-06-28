@@ -30,8 +30,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nats-io/nats-server/v2/logger"
 	"github.com/nats-io/nats.go"
+
+	"github.com/nats-io/nats-server/v2/logger"
 )
 
 func init() {
@@ -792,6 +793,18 @@ func TestGatewaySolicitShutdown(t *testing.T) {
 	s1.Shutdown()
 	if dur := time.Since(start); dur > 1200*time.Millisecond {
 		t.Fatalf("Took too long to shutdown: %v", dur)
+	}
+}
+
+type captureFatalLogger struct {
+	DummyLogger
+	fatalCh chan string
+}
+
+func (l *captureFatalLogger) Fatalf(format string, v ...interface{}) {
+	select {
+	case l.fatalCh <- fmt.Sprintf(format, v...):
+	default:
 	}
 }
 

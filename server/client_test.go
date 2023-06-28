@@ -2406,12 +2406,6 @@ func TestClientConnectionName(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			c := &client{srv: s, nc: &connString{}, kind: test.kind}
-			if test.ws {
-				c.ws = &websocket{}
-			}
-			if test.mqtt {
-				c.mqtt = &mqtt{}
-			}
 			c.initClient()
 
 			if host := "fe80::abc:def:ghi:123%utun0"; host != c.host {

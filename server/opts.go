@@ -249,8 +249,6 @@ type Options struct {
 	JetStreamMaxCatchup   int64
 	StoreDir              string            `json:"-"`
 	JsAccDefaultDomain    map[string]string `json:"-"` // account to domain name mapping
-	Websocket             WebsocketOpts     `json:"-"`
-	MQTT                  MQTTOpts          `json:"-"`
 	ProfPort              int               `json:"-"`
 	PidFile               string            `json:"-"`
 	PortsFileDir          string            `json:"-"`
@@ -331,149 +329,6 @@ type Options struct {
 	// JetStream
 	maxMemSet   bool
 	maxStoreSet bool
-}
-
-// WebsocketOpts are options for websocket
-type WebsocketOpts struct {
-	// The server will accept websocket client connections on this hostname/IP.
-	Host string
-	// The server will accept websocket client connections on this port.
-	Port int
-	// The host:port to advertise to websocket clients in the cluster.
-	Advertise string
-
-	// If no user name is provided when a client connects, will default to the
-	// matching user from the global list of users in `Options.Users`.
-	NoAuthUser string
-
-	// Name of the cookie, which if present in WebSocket upgrade headers,
-	// will be treated as JWT during CONNECT phase as long as
-	// "jwt" specified in the CONNECT options is missing or empty.
-	JWTCookie string
-
-	// Authentication section. If anything is configured in this section,
-	// it will override the authorization configuration of regular clients.
-	Username string
-	Password string
-	Token    string
-
-	// Timeout for the authentication process.
-	AuthTimeout float64
-
-	// By default the server will enforce the use of TLS. If no TLS configuration
-	// is provided, you need to explicitly set NoTLS to true to allow the server
-	// to start without TLS configuration. Note that if a TLS configuration is
-	// present, this boolean is ignored and the server will run the Websocket
-	// server with that TLS configuration.
-	// Running without TLS is less secure since Websocket clients that use bearer
-	// tokens will send them in clear. So this should not be used in production.
-	NoTLS bool
-
-	// TLS configuration is required.
-	TLSConfig *tls.Config
-	// If true, map certificate values for authentication purposes.
-	TLSMap bool
-
-	// When present, accepted client certificates (verify/verify_and_map) must be in this list
-	TLSPinnedCerts PinnedCertSet
-
-	// If true, the Origin header must match the request's host.
-	SameOrigin bool
-
-	// Only origins in this list will be accepted. If empty and
-	// SameOrigin is false, any origin is accepted.
-	AllowedOrigins []string
-
-	// If set to true, the server will negotiate with clients
-	// if compression can be used. If this is false, no compression
-	// will be used (both in server and clients) since it has to
-	// be negotiated between both endpoints
-	Compression bool
-
-	// Total time allowed for the server to read the client request
-	// and write the response back to the client. This include the
-	// time needed for the TLS Handshake.
-	HandshakeTimeout time.Duration
-}
-
-// MQTTOpts are options for MQTT
-type MQTTOpts struct {
-	// The server will accept MQTT client connections on this hostname/IP.
-	Host string
-	// The server will accept MQTT client connections on this port.
-	Port int
-
-	// If no user name is provided when a client connects, will default to the
-	// matching user from the global list of users in `Options.Users`.
-	NoAuthUser string
-
-	// Authentication section. If anything is configured in this section,
-	// it will override the authorization configuration of regular clients.
-	Username string
-	Password string
-	Token    string
-
-	// JetStream domain mqtt is supposed to pick up
-	JsDomain string
-
-	// Number of replicas for MQTT streams.
-	// Negative or 0 value means that the server(s) will pick a replica
-	// number based on the known size of the cluster (but capped at 3).
-	// Note that if an account was already connected, the stream's replica
-	// count is not modified. Use the NATS CLI to update the count if desired.
-	StreamReplicas int
-
-	// Number of replicas for MQTT consumers.
-	// Negative or 0 value means that there is no override and the consumer
-	// will have the same replica factor that the stream it belongs to.
-	// If a value is specified, it will require to be lower than the stream
-	// replicas count (lower than StreamReplicas if specified, but also lower
-	// than the automatic value determined by cluster size).
-	// Note that existing consumers are not modified.
-	//
-	// UPDATE: This is no longer used while messages stream has interest policy retention
-	// which requires consumer replica count to match the parent stream.
-	ConsumerReplicas int
-
-	// Indicate if the consumers should be created with memory storage.
-	// Note that existing consumers are not modified.
-	ConsumerMemoryStorage bool
-
-	// If specified will have the system auto-cleanup the consumers after being
-	// inactive for the specified amount of time.
-	ConsumerInactiveThreshold time.Duration
-
-	// Timeout for the authentication process.
-	AuthTimeout float64
-
-	// TLS configuration is required.
-	TLSConfig *tls.Config
-	// If true, map certificate values for authentication purposes.
-	TLSMap bool
-	// Timeout for the TLS handshake
-	TLSTimeout float64
-	// Set of allowable certificates
-	TLSPinnedCerts PinnedCertSet
-
-	// AckWait is the amount of time after which a QoS 1 message sent to
-	// a client is redelivered as a DUPLICATE if the server has not
-	// received the PUBACK on the original Packet Identifier.
-	// The value has to be positive.
-	// Zero will cause the server to use the default value (30 seconds).
-	// Note that changes to this option is applied only to new MQTT subscriptions.
-	AckWait time.Duration
-
-	// MaxAckPending is the amount of QoS 1 messages the server can send to
-	// a subscription without receiving any PUBACK for those messages.
-	// The valid range is [0..65535].
-	// The total of subscriptions' MaxAckPending on a given session cannot
-	// exceed 65535. Attempting to create a subscription that would bring
-	// the total above the limit would result in the server returning 0x80
-	// in the SUBACK for this subscription.
-	// Due to how the NATS Server handles the MQTT "#" wildcard, each
-	// subscription ending with "#" will use 2 times the MaxAckPending value.
-	// Note that changes to this option is applied only to new subscriptions.
-	MaxAckPending uint16
 }
 
 type netResolver interface {
@@ -1313,16 +1168,6 @@ func (o *Options) processConfigFileLine(k string, v interface{}, errors *[]error
 		o.ConnectErrorReports = int(v.(int64))
 	case "reconnect_error_reports":
 		o.ReconnectErrorReports = int(v.(int64))
-	case "websocket", "ws":
-		if err := parseWebsocket(tk, o, errors, warnings); err != nil {
-			*errors = append(*errors, err)
-			return
-		}
-	case "mqtt":
-		if err := parseMQTT(tk, o, errors, warnings); err != nil {
-			*errors = append(*errors, err)
-			return
-		}
 	case "server_tags":
 		var err error
 		switch v := v.(type) {
@@ -2270,10 +2115,6 @@ func parseRemoteLeafNodes(v interface{}, errors *[]error, warnings *[]error) ([]
 					continue
 				}
 				remote.DenyExports = subjects
-			case "ws_compress", "ws_compression", "websocket_compress", "websocket_compression":
-				remote.Websocket.Compression = v.(bool)
-			case "ws_no_masking", "websocket_no_masking":
-				remote.Websocket.NoMasking = v.(bool)
 			case "jetstream_cluster_migrate", "js_cluster_migrate":
 				remote.JetStreamClusterMigrate = true
 			default:
@@ -4061,191 +3902,6 @@ func parseStringArray(fieldName string, tk token, lt *token, mv interface{}, err
 	}
 }
 
-func parseWebsocket(v interface{}, o *Options, errors *[]error, warnings *[]error) error {
-	var lt token
-	defer convertPanicToErrorList(&lt, errors)
-
-	tk, v := unwrapValue(v, &lt)
-	gm, ok := v.(map[string]interface{})
-	if !ok {
-		return &configErr{tk, fmt.Sprintf("Expected websocket to be a map, got %T", v)}
-	}
-	for mk, mv := range gm {
-		// Again, unwrap token value if line check is required.
-		tk, mv = unwrapValue(mv, &lt)
-		switch strings.ToLower(mk) {
-		case "listen":
-			hp, err := parseListen(mv)
-			if err != nil {
-				err := &configErr{tk, err.Error()}
-				*errors = append(*errors, err)
-				continue
-			}
-			o.Websocket.Host = hp.host
-			o.Websocket.Port = hp.port
-		case "port":
-			o.Websocket.Port = int(mv.(int64))
-		case "host", "net":
-			o.Websocket.Host = mv.(string)
-		case "advertise":
-			o.Websocket.Advertise = mv.(string)
-		case "no_tls":
-			o.Websocket.NoTLS = mv.(bool)
-		case "tls":
-			tc, err := parseTLS(tk, true)
-			if err != nil {
-				*errors = append(*errors, err)
-				continue
-			}
-			if o.Websocket.TLSConfig, err = GenTLSConfig(tc); err != nil {
-				err := &configErr{tk, err.Error()}
-				*errors = append(*errors, err)
-				continue
-			}
-			o.Websocket.TLSMap = tc.Map
-			o.Websocket.TLSPinnedCerts = tc.PinnedCerts
-		case "same_origin":
-			o.Websocket.SameOrigin = mv.(bool)
-		case "allowed_origins", "allowed_origin", "allow_origins", "allow_origin", "origins", "origin":
-			o.Websocket.AllowedOrigins, _ = parseStringArray("allowed origins", tk, &lt, mv, errors, warnings)
-		case "handshake_timeout":
-			ht := time.Duration(0)
-			switch mv := mv.(type) {
-			case int64:
-				ht = time.Duration(mv) * time.Second
-			case string:
-				var err error
-				ht, err = time.ParseDuration(mv)
-				if err != nil {
-					err := &configErr{tk, err.Error()}
-					*errors = append(*errors, err)
-					continue
-				}
-			default:
-				err := &configErr{tk, fmt.Sprintf("error parsing handshake timeout: unsupported type %T", mv)}
-				*errors = append(*errors, err)
-			}
-			o.Websocket.HandshakeTimeout = ht
-		case "compress", "compression":
-			o.Websocket.Compression = mv.(bool)
-		case "authorization", "authentication":
-			auth := parseSimpleAuth(tk, errors, warnings)
-			o.Websocket.Username = auth.user
-			o.Websocket.Password = auth.pass
-			o.Websocket.Token = auth.token
-			o.Websocket.AuthTimeout = auth.timeout
-		case "jwt_cookie":
-			o.Websocket.JWTCookie = mv.(string)
-		case "no_auth_user":
-			o.Websocket.NoAuthUser = mv.(string)
-		default:
-			if !tk.IsUsedVariable() {
-				err := &unknownConfigFieldErr{
-					field: mk,
-					configErr: configErr{
-						token: tk,
-					},
-				}
-				*errors = append(*errors, err)
-				continue
-			}
-		}
-	}
-	return nil
-}
-
-func parseMQTT(v interface{}, o *Options, errors *[]error, warnings *[]error) error {
-	var lt token
-	defer convertPanicToErrorList(&lt, errors)
-
-	tk, v := unwrapValue(v, &lt)
-	gm, ok := v.(map[string]interface{})
-	if !ok {
-		return &configErr{tk, fmt.Sprintf("Expected mqtt to be a map, got %T", v)}
-	}
-	for mk, mv := range gm {
-		// Again, unwrap token value if line check is required.
-		tk, mv = unwrapValue(mv, &lt)
-		switch strings.ToLower(mk) {
-		case "listen":
-			hp, err := parseListen(mv)
-			if err != nil {
-				err := &configErr{tk, err.Error()}
-				*errors = append(*errors, err)
-				continue
-			}
-			o.MQTT.Host = hp.host
-			o.MQTT.Port = hp.port
-		case "port":
-			o.MQTT.Port = int(mv.(int64))
-		case "host", "net":
-			o.MQTT.Host = mv.(string)
-		case "tls":
-			tc, err := parseTLS(tk, true)
-			if err != nil {
-				*errors = append(*errors, err)
-				continue
-			}
-			if o.MQTT.TLSConfig, err = GenTLSConfig(tc); err != nil {
-				err := &configErr{tk, err.Error()}
-				*errors = append(*errors, err)
-				continue
-			}
-			o.MQTT.TLSTimeout = tc.Timeout
-			o.MQTT.TLSMap = tc.Map
-			o.MQTT.TLSPinnedCerts = tc.PinnedCerts
-		case "authorization", "authentication":
-			auth := parseSimpleAuth(tk, errors, warnings)
-			o.MQTT.Username = auth.user
-			o.MQTT.Password = auth.pass
-			o.MQTT.Token = auth.token
-			o.MQTT.AuthTimeout = auth.timeout
-		case "no_auth_user":
-			o.MQTT.NoAuthUser = mv.(string)
-		case "ack_wait", "ackwait":
-			o.MQTT.AckWait = parseDuration("ack_wait", tk, mv, errors, warnings)
-		case "max_ack_pending", "max_pending", "max_inflight":
-			tmp := int(mv.(int64))
-			if tmp < 0 || tmp > 0xFFFF {
-				err := &configErr{tk, fmt.Sprintf("invalid value %v, should in [0..%d] range", tmp, 0xFFFF)}
-				*errors = append(*errors, err)
-			} else {
-				o.MQTT.MaxAckPending = uint16(tmp)
-			}
-		case "js_domain":
-			o.MQTT.JsDomain = mv.(string)
-		case "stream_replicas":
-			o.MQTT.StreamReplicas = int(mv.(int64))
-		case "consumer_replicas":
-			err := &configWarningErr{
-				field: mk,
-				configErr: configErr{
-					token:  tk,
-					reason: `consumer replicas setting ignored in this server version`,
-				},
-			}
-			*warnings = append(*warnings, err)
-		case "consumer_memory_storage":
-			o.MQTT.ConsumerMemoryStorage = mv.(bool)
-		case "consumer_inactive_threshold", "consumer_auto_cleanup":
-			o.MQTT.ConsumerInactiveThreshold = parseDuration("consumer_inactive_threshold", tk, mv, errors, warnings)
-
-		default:
-			if !tk.IsUsedVariable() {
-				err := &unknownConfigFieldErr{
-					field: mk,
-					configErr: configErr{
-						token: tk,
-					},
-				}
-				*errors = append(*errors, err)
-				continue
-			}
-		}
-	}
-	return nil
-}
-
 // GenTLSConfig loads TLS related configuration parameters.
 func GenTLSConfig(tc *TLSConfigOpts) (*tls.Config, error) {
 	// Create the tls.Config from our options before including the certs.
@@ -4590,19 +4246,7 @@ func setBaselineOptions(opts *Options) {
 	if opts.ReconnectErrorReports == 0 {
 		opts.ReconnectErrorReports = DEFAULT_RECONNECT_ERROR_REPORTS
 	}
-	if opts.Websocket.Port != 0 {
-		if opts.Websocket.Host == "" {
-			opts.Websocket.Host = DEFAULT_HOST
-		}
-	}
-	if opts.MQTT.Port != 0 {
-		if opts.MQTT.Host == "" {
-			opts.MQTT.Host = DEFAULT_HOST
-		}
-		if opts.MQTT.TLSTimeout == 0 {
-			opts.MQTT.TLSTimeout = float64(TLS_TIMEOUT) / float64(time.Second)
-		}
-	}
+
 	// JetStream
 	if opts.JetStreamMaxMemory == 0 && !opts.maxMemSet {
 		opts.JetStreamMaxMemory = -1

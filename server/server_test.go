@@ -14,20 +14,16 @@
 package server
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"crypto/tls"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"net"
 	"net/url"
 	"os"
-	"reflect"
 	"runtime"
-	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -959,181 +955,6 @@ func TestLameDuckMode(t *testing.T) {
 	})
 }
 
-func TestLameDuckModeInfo(t *testing.T) {
-	optsA := testWSOptions()
-	optsA.Cluster.Name = "abc"
-	optsA.Cluster.Host = "127.0.0.1"
-	optsA.Cluster.Port = -1
-	// Ensure that initial delay is set very high so that we can
-	// check that some events occur as expected before the client
-	// is disconnected.
-	testSetLDMGracePeriod(optsA, 5*time.Second)
-	optsA.LameDuckDuration = 50 * time.Millisecond
-	optsA.DisableShortFirstPing = true
-	srvA := RunServer(optsA)
-	defer srvA.Shutdown()
-
-	curla := fmt.Sprintf("127.0.0.1:%d", optsA.Port)
-	wscurla := fmt.Sprintf("127.0.0.1:%d", optsA.Websocket.Port)
-	c, err := net.Dial("tcp", curla)
-	if err != nil {
-		t.Fatalf("Error connecting: %v", err)
-	}
-	defer c.Close()
-	client := bufio.NewReaderSize(c, maxBufSize)
-
-	wsconn, wsclient := testWSCreateClient(t, false, false, optsA.Websocket.Host, optsA.Websocket.Port)
-	defer wsconn.Close()
-
-	getInfo := func(ws bool) *serverInfo {
-		t.Helper()
-		var l string
-		var err error
-		if ws {
-			l = string(testWSReadFrame(t, wsclient))
-		} else {
-			l, err = client.ReadString('\n')
-			if err != nil {
-				t.Fatalf("Error receiving info from server: %v\n", err)
-			}
-		}
-		var info serverInfo
-		if err = json.Unmarshal([]byte(l[5:]), &info); err != nil {
-			t.Fatalf("Could not parse INFO json: %v\n", err)
-		}
-		return &info
-	}
-
-	getInfo(false)
-	c.Write([]byte("CONNECT {\"protocol\":1,\"verbose\":false}\r\nPING\r\n"))
-	client.ReadString('\n')
-
-	optsB := testWSOptions()
-	optsB.Cluster.Name = "abc"
-	optsB.Routes = RoutesFromStr(fmt.Sprintf("nats://127.0.0.1:%d", srvA.ClusterAddr().Port))
-	srvB := RunServer(optsB)
-	defer srvB.Shutdown()
-
-	checkClusterFormed(t, srvA, srvB)
-
-	checkConnectURLs := func(expected [][]string) *serverInfo {
-		t.Helper()
-		var si *serverInfo
-		for i, ws := range []bool{false, true} {
-			sort.Strings(expected[i])
-			si = getInfo(ws)
-			sort.Strings(si.ConnectURLs)
-			if !reflect.DeepEqual(expected[i], si.ConnectURLs) {
-				t.Fatalf("Expected %q, got %q", expected, si.ConnectURLs)
-			}
-		}
-		return si
-	}
-
-	curlb := fmt.Sprintf("127.0.0.1:%d", optsB.Port)
-	wscurlb := fmt.Sprintf("127.0.0.1:%d", optsB.Websocket.Port)
-	expected := [][]string{{curla, curlb}, {wscurla, wscurlb}}
-	checkConnectURLs(expected)
-
-	optsC := testWSOptions()
-	testSetLDMGracePeriod(optsA, 5*time.Second)
-	optsC.Cluster.Name = "abc"
-	optsC.Routes = RoutesFromStr(fmt.Sprintf("nats://127.0.0.1:%d", srvA.ClusterAddr().Port))
-	srvC := RunServer(optsC)
-	defer srvC.Shutdown()
-
-	checkClusterFormed(t, srvA, srvB, srvC)
-
-	curlc := fmt.Sprintf("127.0.0.1:%d", optsC.Port)
-	wscurlc := fmt.Sprintf("127.0.0.1:%d", optsC.Websocket.Port)
-	expected = [][]string{{curla, curlb, curlc}, {wscurla, wscurlb, wscurlc}}
-	checkConnectURLs(expected)
-
-	optsD := testWSOptions()
-	optsD.Cluster.Name = "abc"
-	optsD.Routes = RoutesFromStr(fmt.Sprintf("nats://127.0.0.1:%d", srvA.ClusterAddr().Port))
-	srvD := RunServer(optsD)
-	defer srvD.Shutdown()
-
-	checkClusterFormed(t, srvA, srvB, srvC, srvD)
-
-	curld := fmt.Sprintf("127.0.0.1:%d", optsD.Port)
-	wscurld := fmt.Sprintf("127.0.0.1:%d", optsD.Websocket.Port)
-	expected = [][]string{{curla, curlb, curlc, curld}, {wscurla, wscurlb, wscurlc, wscurld}}
-	checkConnectURLs(expected)
-
-	// Now lame duck server A and C. We should have client connected to A
-	// receive info that A is in LDM without A's URL, but also receive
-	// an update with C's URL gone.
-	// But first we need to create a client to C because otherwise the
-	// LDM signal will just shut it down because it would have no client.
-	nc, err := nats.Connect(srvC.ClientURL())
-	if err != nil {
-		t.Fatalf("Failed to connect: %v", err)
-	}
-	defer nc.Close()
-	nc.Flush()
-
-	start := time.Now()
-	wg := sync.WaitGroup{}
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		srvA.lameDuckMode()
-	}()
-
-	expected = [][]string{{curlb, curlc, curld}, {wscurlb, wscurlc, wscurld}}
-	si := checkConnectURLs(expected)
-	if !si.LameDuckMode {
-		t.Fatal("Expected LameDuckMode to be true, it was not")
-	}
-
-	// Start LDM for server C. This should send an update to A
-	// which in turn should remove C from the list of URLs and
-	// update its client.
-	go func() {
-		defer wg.Done()
-		srvC.lameDuckMode()
-	}()
-
-	expected = [][]string{{curlb, curld}, {wscurlb, wscurld}}
-	si = checkConnectURLs(expected)
-	// This update should not say that it is LDM.
-	if si.LameDuckMode {
-		t.Fatal("Expected LameDuckMode to be false, it was true")
-	}
-
-	// Now shutdown D, and we also should get an update.
-	srvD.Shutdown()
-
-	expected = [][]string{{curlb}, {wscurlb}}
-	si = checkConnectURLs(expected)
-	// This update should not say that it is LDM.
-	if si.LameDuckMode {
-		t.Fatal("Expected LameDuckMode to be false, it was true")
-	}
-	if time.Since(start) > 2*time.Second {
-		t.Fatalf("Did not get the expected events prior of server A and C shutting down")
-	}
-
-	// Now explicitly shutdown srvA. When a server shutdown, it closes all its
-	// connections. For routes, it means that it is going to remove the remote's
-	// URL from its map. We want to make sure that in that case, server does not
-	// actually send an updated INFO to its clients.
-	srvA.Shutdown()
-
-	// Expect nothing to be received on the client connection.
-	if l, err := client.ReadString('\n'); err == nil {
-		t.Fatalf("Expected connection to fail, instead got %q", l)
-	}
-
-	c.Close()
-	nc.Close()
-	// Don't need to wait for actual disconnect of clients.
-	srvC.Shutdown()
-	wg.Wait()
-}
-
 func TestServerValidateGatewaysOptions(t *testing.T) {
 	baseOpt := testDefaultOptionsForGateway("A")
 	u, _ := url.Parse("host:5222")
@@ -1261,12 +1082,6 @@ func TestServerShutdownDuringStart(t *testing.T) {
 	o.Gateway.Port = -1
 	o.LeafNode.Host = "127.0.0.1"
 	o.LeafNode.Port = -1
-	o.Websocket.Host = "127.0.0.1"
-	o.Websocket.Port = -1
-	o.Websocket.HandshakeTimeout = 1
-	o.Websocket.NoTLS = true
-	o.MQTT.Host = "127.0.0.1"
-	o.MQTT.Port = -1
 
 	// We are going to test that if the server is shutdown
 	// while Start() runs (in this case, before), we don't
@@ -1305,12 +1120,7 @@ func TestServerShutdownDuringStart(t *testing.T) {
 	if s.leafNodeListener != nil {
 		listeners = append(listeners, "leafnode")
 	}
-	if s.websocket.listener != nil {
-		listeners = append(listeners, "websocket")
-	}
-	if s.mqtt.listener != nil {
-		listeners = append(listeners, "mqtt")
-	}
+
 	s.mu.Unlock()
 	if len(listeners) > 0 {
 		lst := ""

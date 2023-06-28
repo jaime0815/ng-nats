@@ -653,61 +653,6 @@ func (m *maxTracedMsgLenOption) Apply(server *Server) {
 	server.Noticef("Reloaded: max_traced_msg_len = %d", m.newValue)
 }
 
-type mqttAckWaitReload struct {
-	noopOption
-	newValue time.Duration
-}
-
-func (o *mqttAckWaitReload) Apply(s *Server) {
-	s.Noticef("Reloaded: MQTT ack_wait = %v", o.newValue)
-}
-
-type mqttMaxAckPendingReload struct {
-	noopOption
-	newValue uint16
-}
-
-func (o *mqttMaxAckPendingReload) Apply(s *Server) {
-	s.mqttUpdateMaxAckPending(o.newValue)
-	s.Noticef("Reloaded: MQTT max_ack_pending = %v", o.newValue)
-}
-
-type mqttStreamReplicasReload struct {
-	noopOption
-	newValue int
-}
-
-func (o *mqttStreamReplicasReload) Apply(s *Server) {
-	s.Noticef("Reloaded: MQTT stream_replicas = %v", o.newValue)
-}
-
-type mqttConsumerReplicasReload struct {
-	noopOption
-	newValue int
-}
-
-func (o *mqttConsumerReplicasReload) Apply(s *Server) {
-	s.Noticef("Reloaded: MQTT consumer_replicas = %v", o.newValue)
-}
-
-type mqttConsumerMemoryStorageReload struct {
-	noopOption
-	newValue bool
-}
-
-func (o *mqttConsumerMemoryStorageReload) Apply(s *Server) {
-	s.Noticef("Reloaded: MQTT consumer_memory_storage = %v", o.newValue)
-}
-
-type mqttInactiveThresholdReload struct {
-	noopOption
-	newValue time.Duration
-}
-
-func (o *mqttInactiveThresholdReload) Apply(s *Server) {
-	s.Noticef("Reloaded: MQTT consumer_inactive_threshold = %v", o.newValue)
-}
-
 // Compares options and disconnects clients that are no longer listed in pinned certs. Lock must not be held.
 func (s *Server) recheckPinnedCerts(curOpts *Options, newOpts *Options) {
 	s.mu.Lock()
@@ -715,9 +660,6 @@ func (s *Server) recheckPinnedCerts(curOpts *Options, newOpts *Options) {
 	protoToPinned := map[int]PinnedCertSet{}
 	if !reflect.DeepEqual(newOpts.TLSPinnedCerts, curOpts.TLSPinnedCerts) {
 		protoToPinned[NATS] = curOpts.TLSPinnedCerts
-	}
-	if !reflect.DeepEqual(newOpts.MQTT.TLSPinnedCerts, curOpts.MQTT.TLSPinnedCerts) {
-		protoToPinned[MQTT] = curOpts.MQTT.TLSPinnedCerts
 	}
 	for _, c := range s.clients {
 		if c.kind != CLIENT {
@@ -801,8 +743,6 @@ func (s *Server) ReloadOptions(newOpts *Options) error {
 	clusterOrgPort := curOpts.Cluster.Port
 	gatewayOrgPort := curOpts.Gateway.Port
 	leafnodesOrgPort := curOpts.LeafNode.Port
-	websocketOrgPort := curOpts.Websocket.Port
-	mqttOrgPort := curOpts.MQTT.Port
 
 	s.mu.Unlock()
 
@@ -831,12 +771,6 @@ func (s *Server) ReloadOptions(newOpts *Options) error {
 	}
 	if newOpts.LeafNode.Port == -1 {
 		newOpts.LeafNode.Port = leafnodesOrgPort
-	}
-	if newOpts.Websocket.Port == -1 {
-		newOpts.Websocket.Port = websocketOrgPort
-	}
-	if newOpts.MQTT.Port == -1 {
-		newOpts.MQTT.Port = mqttOrgPort
 	}
 
 	if err := s.reloadOptions(curOpts, newOpts); err != nil {
@@ -938,10 +872,8 @@ func imposeOrder(value interface{}) error {
 		sort.Slice(value.Gateways, func(i, j int) bool {
 			return value.Gateways[i].Name < value.Gateways[j].Name
 		})
-	case WebsocketOpts:
-		sort.Strings(value.AllowedOrigins)
 	case string, bool, uint8, int, int32, int64, time.Duration, float64, nil, LeafNodeOpts, ClusterOpts, *tls.Config, PinnedCertSet,
-		*URLAccResolver, *MemAccResolver, *DirAccResolver, *CacheDirAccResolver, Authentication, MQTTOpts, jwt.TagList,
+		*URLAccResolver, *MemAccResolver, *DirAccResolver, *CacheDirAccResolver, Authentication, jwt.TagList,
 		*OCSPConfig, map[string]string, JSLimitOpts, StoreCipher:
 		// explicitly skipped types
 	default:
@@ -1262,46 +1194,6 @@ func (s *Server) diffOptions(newOpts *Options) ([]option, error) {
 					return nil, fmt.Errorf("config reload not supported for jetstream max memory and store")
 				}
 			}
-		case "websocket":
-			// Similar to gateways
-			tmpOld := oldValue.(WebsocketOpts)
-			tmpNew := newValue.(WebsocketOpts)
-			tmpOld.TLSConfig = nil
-			tmpNew.TLSConfig = nil
-			// If there is really a change prevents reload.
-			if !reflect.DeepEqual(tmpOld, tmpNew) {
-				// See TODO(ik) note below about printing old/new values.
-				return nil, fmt.Errorf("config reload not supported for %s: old=%v, new=%v",
-					field.Name, oldValue, newValue)
-			}
-		case "mqtt":
-			diffOpts = append(diffOpts, &mqttAckWaitReload{newValue: newValue.(MQTTOpts).AckWait})
-			diffOpts = append(diffOpts, &mqttMaxAckPendingReload{newValue: newValue.(MQTTOpts).MaxAckPending})
-			diffOpts = append(diffOpts, &mqttStreamReplicasReload{newValue: newValue.(MQTTOpts).StreamReplicas})
-			diffOpts = append(diffOpts, &mqttConsumerReplicasReload{newValue: newValue.(MQTTOpts).ConsumerReplicas})
-			diffOpts = append(diffOpts, &mqttConsumerMemoryStorageReload{newValue: newValue.(MQTTOpts).ConsumerMemoryStorage})
-			diffOpts = append(diffOpts, &mqttInactiveThresholdReload{newValue: newValue.(MQTTOpts).ConsumerInactiveThreshold})
-
-			// Nil out/set to 0 the options that we allow to be reloaded so that
-			// we only fail reload if some that we don't support are changed.
-			tmpOld := oldValue.(MQTTOpts)
-			tmpNew := newValue.(MQTTOpts)
-			tmpOld.TLSConfig, tmpOld.AckWait, tmpOld.MaxAckPending, tmpOld.StreamReplicas, tmpOld.ConsumerReplicas, tmpOld.ConsumerMemoryStorage = nil, 0, 0, 0, 0, false
-			tmpOld.ConsumerInactiveThreshold = 0
-			tmpNew.TLSConfig, tmpNew.AckWait, tmpNew.MaxAckPending, tmpNew.StreamReplicas, tmpNew.ConsumerReplicas, tmpNew.ConsumerMemoryStorage = nil, 0, 0, 0, 0, false
-			tmpNew.ConsumerInactiveThreshold = 0
-
-			if !reflect.DeepEqual(tmpOld, tmpNew) {
-				// See TODO(ik) note below about printing old/new values.
-				return nil, fmt.Errorf("config reload not supported for %s: old=%v, new=%v",
-					field.Name, oldValue, newValue)
-			}
-			tmpNew.AckWait = newValue.(MQTTOpts).AckWait
-			tmpNew.MaxAckPending = newValue.(MQTTOpts).MaxAckPending
-			tmpNew.StreamReplicas = newValue.(MQTTOpts).StreamReplicas
-			tmpNew.ConsumerReplicas = newValue.(MQTTOpts).ConsumerReplicas
-			tmpNew.ConsumerMemoryStorage = newValue.(MQTTOpts).ConsumerMemoryStorage
-			tmpNew.ConsumerInactiveThreshold = newValue.(MQTTOpts).ConsumerInactiveThreshold
 		case "connecterrorreports":
 			diffOpts = append(diffOpts, &connectErrorReports{newValue: newValue.(int)})
 		case "reconnecterrorreports":
@@ -1734,9 +1626,6 @@ func (s *Server) reloadAuthorization() {
 	if resetCh != nil {
 		resetCh <- struct{}{}
 	}
-
-	// Check that publish retained messages sources are still allowed to publish.
-	s.mqttCheckPubRetainedPerms()
 
 	// Close clients that have moved accounts
 	for _, client := range cclients {

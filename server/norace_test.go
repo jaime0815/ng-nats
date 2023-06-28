@@ -1011,7 +1011,6 @@ func TestNoRaceAcceptLoopsDoNotLeaveOpenedConn(t *testing.T) {
 		{"route", func(o *Options) (string, int) { return o.Cluster.Host, o.Cluster.Port }},
 		{"gateway", func(o *Options) (string, int) { return o.Gateway.Host, o.Gateway.Port }},
 		{"leafnode", func(o *Options) (string, int) { return o.LeafNode.Host, o.LeafNode.Port }},
-		{"websocket", func(o *Options) (string, int) { return o.Websocket.Host, o.Websocket.Port }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			o := DefaultOptions()
@@ -1026,10 +1025,6 @@ func TestNoRaceAcceptLoopsDoNotLeaveOpenedConn(t *testing.T) {
 			o.Gateway.Port = -1
 			o.LeafNode.Host = "127.0.0.1"
 			o.LeafNode.Port = -1
-			o.Websocket.Host = "127.0.0.1"
-			o.Websocket.Port = -1
-			o.Websocket.HandshakeTimeout = 1
-			o.Websocket.NoTLS = true
 			s := RunServer(o)
 			defer s.Shutdown()
 

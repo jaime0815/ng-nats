@@ -2466,7 +2466,6 @@ func (c *client) sendMsgToGateways(acc *Account, msg, subject, reply []byte, qgr
 		dstHash    []byte
 		checkReply = len(reply) > 0
 		didDeliver bool
-		prodIsMQTT = c.isMqtt()
 		dlvMsgs    int64
 	)
 
@@ -2596,7 +2595,7 @@ func (c *client) sendMsgToGateways(acc *Account, msg, subject, reply []byte, qgr
 		sub.nm, sub.max = 0, 0
 		sub.client = gwc
 		sub.subject = subject
-		if c.deliverMsg(prodIsMQTT, sub, acc, subject, mreply, mh, msg, false) {
+		if c.deliverMsg(sub, acc, subject, mreply, mh, msg, false) {
 			// We don't count internal deliveries so count only if sub.icb is nil
 			if sub.icb == nil {
 				dlvMsgs++
@@ -2606,10 +2605,6 @@ func (c *client) sendMsgToGateways(acc *Account, msg, subject, reply []byte, qgr
 	}
 	if dlvMsgs > 0 {
 		totalBytes := dlvMsgs * int64(len(msg))
-		// For non MQTT producers, remove the CR_LF * number of messages
-		if !prodIsMQTT {
-			totalBytes -= dlvMsgs * int64(LEN_CR_LF)
-		}
 		if acc != nil {
 			atomic.AddInt64(&acc.outMsgs, dlvMsgs)
 			atomic.AddInt64(&acc.outBytes, totalBytes)

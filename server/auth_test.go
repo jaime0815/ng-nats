@@ -19,11 +19,9 @@ import (
 	"net/url"
 	"os"
 	"reflect"
-	"strings"
 	"testing"
 	"time"
 
-	"github.com/nats-io/jwt/v2"
 	"github.com/nats-io/nats.go"
 )
 
@@ -108,56 +106,6 @@ func TestUserCloneNil(t *testing.T) {
 	clone := user.clone()
 	if clone != nil {
 		t.Fatalf("Expected nil, got: %+v", clone)
-	}
-}
-
-func TestUserUnknownAllowedConnectionType(t *testing.T) {
-	o := DefaultOptions()
-	o.Users = []*User{{
-		Username:               "user",
-		Password:               "pwd",
-		AllowedConnectionTypes: testCreateAllowedConnectionTypes([]string{jwt.ConnectionTypeStandard, "someNewType"}),
-	}}
-	_, err := NewServer(o)
-	if err == nil || !strings.Contains(err.Error(), "connection type") {
-		t.Fatalf("Expected error about unknown connection type, got %v", err)
-	}
-
-	o.Users[0].AllowedConnectionTypes = testCreateAllowedConnectionTypes([]string{"websocket"})
-	s, err := NewServer(o)
-	if err != nil {
-		t.Fatalf("Unexpected error: %v", err)
-	}
-	s.mu.Lock()
-	user := s.opts.Users[0]
-	s.mu.Unlock()
-	for act := range user.AllowedConnectionTypes {
-		if act != jwt.ConnectionTypeWebsocket {
-			t.Fatalf("Expected map to have been updated with proper case, got %v", act)
-		}
-	}
-	// Same with NKey user now.
-	o.Users = nil
-	o.Nkeys = []*NkeyUser{{
-		Nkey:                   "somekey",
-		AllowedConnectionTypes: testCreateAllowedConnectionTypes([]string{jwt.ConnectionTypeStandard, "someNewType"}),
-	}}
-	_, err = NewServer(o)
-	if err == nil || !strings.Contains(err.Error(), "connection type") {
-		t.Fatalf("Expected error about unknown connection type, got %v", err)
-	}
-	o.Nkeys[0].AllowedConnectionTypes = testCreateAllowedConnectionTypes([]string{"websocket"})
-	s, err = NewServer(o)
-	if err != nil {
-		t.Fatalf("Unexpected error: %v", err)
-	}
-	s.mu.Lock()
-	nkey := s.opts.Nkeys[0]
-	s.mu.Unlock()
-	for act := range nkey.AllowedConnectionTypes {
-		if act != jwt.ConnectionTypeWebsocket {
-			t.Fatalf("Expected map to have been updated with proper case, got %v", act)
-		}
 	}
 }
 

@@ -972,9 +972,7 @@ func TestTlsPinnedCertificates(t *testing.T) {
 	check(opts.TLSPinnedCerts)
 	check(opts.LeafNode.TLSPinnedCerts)
 	check(opts.Cluster.TLSPinnedCerts)
-	check(opts.MQTT.TLSPinnedCerts)
 	check(opts.Gateway.TLSPinnedCerts)
-	check(opts.Websocket.TLSPinnedCerts)
 }
 
 func TestNkeyUsersDefaultPermissionsConfig(t *testing.T) {

@@ -261,9 +261,6 @@ func (s *Server) configureAuthorization() {
 		s.nkeys = nil
 		s.info.AuthRequired = false
 	}
-
-	// And for mqtt config
-	s.mqttConfigAuth(&opts.MQTT)
 }
 
 // Takes the given slices of NkeyUser and User options and build
@@ -550,14 +547,6 @@ func (s *Server) processClientOrLeafAuthentication(c *client, opts *Options) boo
 	s.mu.Lock()
 	authRequired := s.info.AuthRequired
 	if !authRequired {
-		// If no auth required for regular clients, then check if
-		// we have an override for MQTT or Websocket clients.
-		switch c.clientType() {
-		case MQTT:
-			authRequired = s.mqtt.authOverride
-		}
-	}
-	if !authRequired {
 		// TODO(dlc) - If they send us credentials should we fail?
 		s.mu.Unlock()
 		return true
@@ -570,23 +559,7 @@ func (s *Server) processClientOrLeafAuthentication(c *client, opts *Options) boo
 		pinnedAcounts map[string]struct{}
 	)
 	tlsMap := opts.TLSMap
-	if c.kind == CLIENT {
-		switch c.clientType() {
-		case MQTT:
-			mo := &opts.MQTT
-			// Always override TLSMap.
-			tlsMap = mo.TLSMap
-			// The rest depends on if there was any auth override in
-			// the mqtt's config.
-			if s.mqtt.authOverride {
-				noAuthUser = mo.NoAuthUser
-				username = mo.Username
-				password = mo.Password
-				token = mo.Token
-				ao = true
-			}
-		}
-	} else {
+	if c.kind != CLIENT {
 		tlsMap = opts.LeafNode.TLSMap
 	}
 
