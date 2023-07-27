@@ -107,14 +107,6 @@ func newQSub(subject, queue string) *subscription {
 	return newSub(subject)
 }
 
-func newRemoteQSub(subject, queue string, num int32) *subscription {
-	if queue != "" {
-		c := &client{kind: ROUTER}
-		return &subscription{client: c, subject: []byte(subject), queue: []byte(queue), qw: num}
-	}
-	return newSub(subject)
-}
-
 func TestSublistInit(t *testing.T) {
 	s := NewSublistWithCache()
 	verifyCount(s, 0, t)
@@ -990,59 +982,6 @@ func TestSublistRaceOnMatch(t *testing.T) {
 	}
 }
 
-// Remote subscriptions for queue subscribers will be weighted such that a single subscription
-// is received, but represents all of the queue subscribers on the remote side.
-func TestSublistRemoteQueueSubscriptions(t *testing.T) {
-	testSublistRemoteQueueSubscriptions(t, NewSublistWithCache())
-}
-
-func TestSublistRemoteQueueSubscriptionsNoCache(t *testing.T) {
-	testSublistRemoteQueueSubscriptions(t, NewSublistNoCache())
-}
-
-func testSublistRemoteQueueSubscriptions(t *testing.T, s *Sublist) {
-	// Normals
-	s1 := newQSub("foo", "bar")
-	s2 := newQSub("foo", "bar")
-	s.Insert(s1)
-	s.Insert(s2)
-
-	// Now do weighted remotes.
-	rs1 := newRemoteQSub("foo", "bar", 10)
-	s.Insert(rs1)
-	rs2 := newRemoteQSub("foo", "bar", 10)
-	s.Insert(rs2)
-
-	// These are just shadowed in results, so should appear as 4 subs.
-	verifyCount(s, 4, t)
-
-	r := s.Match("foo")
-	verifyLen(r.psubs, 0, t)
-	verifyQLen(r.qsubs, 1, t)
-	verifyLen(r.qsubs[0], 22, t)
-
-	s.Remove(s1)
-	s.Remove(rs1)
-
-	verifyCount(s, 2, t)
-
-	// Now make sure our shadowed results are correct after a removal.
-	r = s.Match("foo")
-	verifyLen(r.psubs, 0, t)
-	verifyQLen(r.qsubs, 1, t)
-	verifyLen(r.qsubs[0], 11, t)
-
-	// Now do an update to an existing remote sub to update its weight.
-	rs2.qw = 1
-	s.UpdateRemoteQSub(rs2)
-
-	// Results should reflect new weight.
-	r = s.Match("foo")
-	verifyLen(r.psubs, 0, t)
-	verifyQLen(r.qsubs, 1, t)
-	verifyLen(r.qsubs[0], 2, t)
-}
-
 func TestSublistSharedEmptyResult(t *testing.T) {
 	s := NewSublistWithCache()
 	r1 := s.Match("foo")
@@ -1080,7 +1019,7 @@ func TestSublistAll(t *testing.T) {
 		newSub("baz"),
 	}
 	// alter client's kind
-	subs[0].client.kind = LEAF
+	subs[0].client.kind = CLIENT
 	for _, sub := range subs {
 		s.Insert(sub)
 	}

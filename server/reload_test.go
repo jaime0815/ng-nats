@@ -26,7 +26,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -143,12 +142,7 @@ func TestConfigReloadUnsupported(t *testing.T) {
 		PingInterval:   2 * time.Minute,
 		MaxPingsOut:    2,
 		WriteDeadline:  10 * time.Second,
-		Cluster: ClusterOpts{
-			Name: "abc",
-			Host: "127.0.0.1",
-			Port: -1,
-		},
-		NoSigs: true,
+		NoSigs:         true,
 	}
 	setBaselineOptions(golden)
 
@@ -215,12 +209,7 @@ func TestConfigReloadInvalidConfig(t *testing.T) {
 		PingInterval:   2 * time.Minute,
 		MaxPingsOut:    2,
 		WriteDeadline:  10 * time.Second,
-		Cluster: ClusterOpts{
-			Name: "abc",
-			Host: "127.0.0.1",
-			Port: -1,
-		},
-		NoSigs: true,
+		NoSigs:         true,
 	}
 	setBaselineOptions(golden)
 
@@ -278,12 +267,7 @@ func TestConfigReload(t *testing.T) {
 		PingInterval:   2 * time.Minute,
 		MaxPingsOut:    2,
 		WriteDeadline:  10 * time.Second,
-		Cluster: ClusterOpts{
-			Name: "abc",
-			Host: "127.0.0.1",
-			Port: server.ClusterAddr().Port,
-		},
-		NoSigs: true,
+		NoSigs:         true,
 	}
 	setBaselineOptions(golden)
 
@@ -338,9 +322,6 @@ func TestConfigReload(t *testing.T) {
 	}
 	if !server.info.AuthRequired {
 		t.Fatal("Expected AuthRequired to be true")
-	}
-	if !updated.Cluster.NoAdvertise {
-		t.Fatal("Expected NoAdvertise to be true")
 	}
 	if updated.PidFile != "nats-server.pid" {
 		t.Fatalf("PidFile is incorrect.\nexpected: nats-server.pid\ngot: %s", updated.PidFile)
@@ -1246,150 +1227,6 @@ func reloadUpdateConfig(t *testing.T, s *Server, conf, content string) {
 	}
 	if err := s.Reload(); err != nil {
 		t.Fatalf("Error on reload: %v", err)
-	}
-}
-
-func TestConfigReloadClusterAdvertise(t *testing.T) {
-	s, _, conf := runReloadServerWithContent(t, []byte(`
-		listen: "0.0.0.0:-1"
-		cluster: {
-			listen: "0.0.0.0:-1"
-		}
-	`))
-	defer s.Shutdown()
-
-	orgClusterPort := s.ClusterAddr().Port
-
-	verify := func(expectedHost string, expectedPort int, expectedIP string) {
-		s.mu.Lock()
-		routeInfo := s.routeInfo
-		routeInfoJSON := Info{}
-		err := json.Unmarshal(s.routeInfoJSON[5:], &routeInfoJSON) // Skip "INFO "
-		s.mu.Unlock()
-		if err != nil {
-			t.Fatalf("Error on Unmarshal: %v", err)
-		}
-		if routeInfo.Host != expectedHost || routeInfo.Port != expectedPort || routeInfo.IP != expectedIP {
-			t.Fatalf("Expected host/port/IP to be %s:%v, %q, got %s:%d, %q",
-				expectedHost, expectedPort, expectedIP, routeInfo.Host, routeInfo.Port, routeInfo.IP)
-		}
-		// Check that server routeInfoJSON was updated too
-		if !reflect.DeepEqual(routeInfo, routeInfoJSON) {
-			t.Fatalf("Expected routeInfoJSON to be %+v, got %+v", routeInfo, routeInfoJSON)
-		}
-	}
-
-	// Update config with cluster_advertise
-	reloadUpdateConfig(t, s, conf, `
-	listen: "0.0.0.0:-1"
-	cluster: {
-		listen: "0.0.0.0:-1"
-		cluster_advertise: "me:1"
-	}
-	`)
-	verify("me", 1, "nats-route://me:1/")
-
-	// Update config with cluster_advertise (no port specified)
-	reloadUpdateConfig(t, s, conf, `
-	listen: "0.0.0.0:-1"
-	cluster: {
-		listen: "0.0.0.0:-1"
-		cluster_advertise: "me"
-	}
-	`)
-	verify("me", orgClusterPort, fmt.Sprintf("nats-route://me:%d/", orgClusterPort))
-
-	// Update config with cluster_advertise (-1 port specified)
-	reloadUpdateConfig(t, s, conf, `
-	listen: "0.0.0.0:-1"
-	cluster: {
-		listen: "0.0.0.0:-1"
-		cluster_advertise: "me:-1"
-	}
-	`)
-	verify("me", orgClusterPort, fmt.Sprintf("nats-route://me:%d/", orgClusterPort))
-
-	// Update to remove cluster_advertise
-	reloadUpdateConfig(t, s, conf, `
-	listen: "0.0.0.0:-1"
-	cluster: {
-		listen: "0.0.0.0:-1"
-	}
-	`)
-	verify("0.0.0.0", orgClusterPort, "")
-}
-
-func TestConfigReloadClusterNoAdvertise(t *testing.T) {
-	s, _, conf := runReloadServerWithContent(t, []byte(`
-		listen: "0.0.0.0:-1"
-		client_advertise: "me:1"
-		cluster: {
-			listen: "0.0.0.0:-1"
-		}
-	`))
-	defer s.Shutdown()
-
-	s.mu.Lock()
-	ccurls := s.routeInfo.ClientConnectURLs
-	s.mu.Unlock()
-	if len(ccurls) != 1 && ccurls[0] != "me:1" {
-		t.Fatalf("Unexpected routeInfo.ClientConnectURLS: %v", ccurls)
-	}
-
-	// Update config with no_advertise
-	reloadUpdateConfig(t, s, conf, `
-	listen: "0.0.0.0:-1"
-	client_advertise: "me:1"
-	cluster: {
-		listen: "0.0.0.0:-1"
-		no_advertise: true
-	}
-	`)
-
-	s.mu.Lock()
-	ccurls = s.routeInfo.ClientConnectURLs
-	s.mu.Unlock()
-	if len(ccurls) != 0 {
-		t.Fatalf("Unexpected routeInfo.ClientConnectURLS: %v", ccurls)
-	}
-
-	// Update config with cluster_advertise (no port specified)
-	reloadUpdateConfig(t, s, conf, `
-	listen: "0.0.0.0:-1"
-	client_advertise: "me:1"
-	cluster: {
-		listen: "0.0.0.0:-1"
-	}
-	`)
-	s.mu.Lock()
-	ccurls = s.routeInfo.ClientConnectURLs
-	s.mu.Unlock()
-	if len(ccurls) != 1 && ccurls[0] != "me:1" {
-		t.Fatalf("Unexpected routeInfo.ClientConnectURLS: %v", ccurls)
-	}
-}
-
-func TestConfigReloadClusterName(t *testing.T) {
-	s, _, conf := runReloadServerWithContent(t, []byte(`
-		listen: "0.0.0.0:-1"
-		cluster: {
-			name: "abc"
-			listen: "0.0.0.0:-1"
-		}
-	`))
-	defer s.Shutdown()
-
-	// Update config with a new cluster name.
-	reloadUpdateConfig(t, s, conf, `
-	listen: "0.0.0.0:-1"
-	cluster: {
-		name: "xyz"
-		listen: "0.0.0.0:-1"
-	}
-	`)
-
-	if s.ClusterName() != "xyz" {
-		t.Fatalf("Expected update clustername of \"xyz\", got %q", s.ClusterName())
 	}
 }
 
@@ -2417,55 +2254,6 @@ func TestConfigReloadBoolFlags(t *testing.T) {
 			[]string{"-syslog=false"},
 			false,
 			func() bool { return opts.Syslog },
-		},
-		// Cluster.NoAdvertise
-		{
-			"cluster_no_advertise_not_in_config_no_override",
-			`cluster {
-				port: -1
-			}`,
-			nil,
-			false,
-			func() bool { return opts.Cluster.NoAdvertise },
-		},
-		{
-			"cluster_no_advertise_not_in_config_override_true",
-			`cluster {
-				port: -1
-			}`,
-			[]string{"-no_advertise"},
-			true,
-			func() bool { return opts.Cluster.NoAdvertise },
-		},
-		{
-			"cluster_no_advertise_false_in_config_no_override",
-			`cluster {
-				port: -1
-				no_advertise: false
-			}`,
-			nil,
-			false,
-			func() bool { return opts.Cluster.NoAdvertise },
-		},
-		{
-			"cluster_no_advertise_false_in_config_override_true",
-			`cluster {
-				port: -1
-				no_advertise: false
-			}`,
-			[]string{"-no_advertise"},
-			true,
-			func() bool { return opts.Cluster.NoAdvertise },
-		},
-		{
-			"cluster_no_advertise_true_in_config_no_override",
-			`cluster {
-				port: -1
-				no_advertise: true
-			}`,
-			nil,
-			true,
-			func() bool { return opts.Cluster.NoAdvertise },
 		},
 		{
 			"cluster_no_advertise_true_in_config_override_false",

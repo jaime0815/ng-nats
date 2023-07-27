@@ -332,93 +332,6 @@ func (u *nkeysOption) Apply(server *Server) {
 	server.Noticef("Reloaded: authorization nkey users")
 }
 
-// clusterOption implements the option interface for the `cluster` setting.
-type clusterOption struct {
-	authOption
-	newValue     ClusterOpts
-	permsChanged bool
-}
-
-// Apply the cluster change.
-func (c *clusterOption) Apply(s *Server) {
-	// TODO: support enabling/disabling clustering.
-	s.mu.Lock()
-	tlsRequired := c.newValue.TLSConfig != nil
-	s.routeInfo.TLSRequired = tlsRequired
-	s.routeInfo.TLSVerify = tlsRequired
-	s.routeInfo.AuthRequired = c.newValue.Username != ""
-	if c.newValue.NoAdvertise {
-		s.routeInfo.ClientConnectURLs = nil
-		s.routeInfo.WSConnectURLs = nil
-	} else {
-		s.routeInfo.ClientConnectURLs = s.clientConnectURLs
-		s.routeInfo.WSConnectURLs = s.websocket.connectURLs
-	}
-	s.setRouteInfoHostPortAndIP()
-	s.mu.Unlock()
-	if c.newValue.Name != "" && c.newValue.Name != s.ClusterName() {
-		s.setClusterName(c.newValue.Name)
-	}
-	s.Noticef("Reloaded: cluster")
-	if tlsRequired && c.newValue.TLSConfig.InsecureSkipVerify {
-		s.Warnf(clusterTLSInsecureWarning)
-	}
-}
-
-func (c *clusterOption) IsClusterPermsChange() bool {
-	return c.permsChanged
-}
-
-// routesOption implements the option interface for the cluster `routes`
-// setting.
-type routesOption struct {
-	noopOption
-	add    []*url.URL
-	remove []*url.URL
-}
-
-// Apply the route changes by adding and removing the necessary routes.
-func (r *routesOption) Apply(server *Server) {
-	server.mu.Lock()
-	routes := make([]*client, len(server.routes))
-	i := 0
-	for _, client := range server.routes {
-		routes[i] = client
-		i++
-	}
-	// If there was a change, notify monitoring code that it should
-	// update the route URLs if /varz endpoint is inspected.
-	if len(r.add)+len(r.remove) > 0 {
-		server.varzUpdateRouteURLs = true
-	}
-	server.mu.Unlock()
-
-	// Remove routes.
-	for _, remove := range r.remove {
-		for _, client := range routes {
-			var url *url.URL
-			client.mu.Lock()
-			if client.route != nil {
-				url = client.route.url
-			}
-			client.mu.Unlock()
-			if url != nil && urlsAreEqual(url, remove) {
-				// Do not attempt to reconnect when route is removed.
-				client.setNoReconnect()
-				client.closeConnection(RouteRemoved)
-				server.Noticef("Removed route %v", remove)
-			}
-		}
-	}
-
-	// Add routes.
-	server.mu.Lock()
-	server.solicitRoutes(r.add)
-	server.mu.Unlock()
-
-	server.Noticef("Reloaded: cluster routes")
-}
-
 // maxConnOption implements the option interface for the `max_connections`
 // setting.
 type maxConnOption struct {
@@ -654,75 +567,12 @@ func (m *maxTracedMsgLenOption) Apply(server *Server) {
 	server.Noticef("Reloaded: max_traced_msg_len = %d", m.newValue)
 }
 
-type mqttAckWaitReload struct {
-	noopOption
-	newValue time.Duration
-}
-
-func (o *mqttAckWaitReload) Apply(s *Server) {
-	s.Noticef("Reloaded: MQTT ack_wait = %v", o.newValue)
-}
-
-type mqttMaxAckPendingReload struct {
-	noopOption
-	newValue uint16
-}
-
-func (o *mqttMaxAckPendingReload) Apply(s *Server) {
-	s.mqttUpdateMaxAckPending(o.newValue)
-	s.Noticef("Reloaded: MQTT max_ack_pending = %v", o.newValue)
-}
-
-type mqttStreamReplicasReload struct {
-	noopOption
-	newValue int
-}
-
-func (o *mqttStreamReplicasReload) Apply(s *Server) {
-	s.Noticef("Reloaded: MQTT stream_replicas = %v", o.newValue)
-}
-
-type mqttConsumerReplicasReload struct {
-	noopOption
-	newValue int
-}
-
-func (o *mqttConsumerReplicasReload) Apply(s *Server) {
-	s.Noticef("Reloaded: MQTT consumer_replicas = %v", o.newValue)
-}
-
-type mqttConsumerMemoryStorageReload struct {
-	noopOption
-	newValue bool
-}
-
-func (o *mqttConsumerMemoryStorageReload) Apply(s *Server) {
-	s.Noticef("Reloaded: MQTT consumer_memory_storage = %v", o.newValue)
-}
-
-type mqttInactiveThresholdReload struct {
-	noopOption
-	newValue time.Duration
-}
-
-func (o *mqttInactiveThresholdReload) Apply(s *Server) {
-	s.Noticef("Reloaded: MQTT consumer_inactive_threshold = %v", o.newValue)
-}
-
 // Compares options and disconnects clients that are no longer listed in pinned certs. Lock must not be held.
 func (s *Server) recheckPinnedCerts(curOpts *Options, newOpts *Options) {
 	s.mu.Lock()
 	disconnectClients := []*client{}
 	protoToPinned := map[int]PinnedCertSet{}
-	if !reflect.DeepEqual(newOpts.TLSPinnedCerts, curOpts.TLSPinnedCerts) {
-		protoToPinned[NATS] = curOpts.TLSPinnedCerts
-	}
-	if !reflect.DeepEqual(newOpts.MQTT.TLSPinnedCerts, curOpts.MQTT.TLSPinnedCerts) {
-		protoToPinned[MQTT] = curOpts.MQTT.TLSPinnedCerts
-	}
-	if !reflect.DeepEqual(newOpts.Websocket.TLSPinnedCerts, curOpts.Websocket.TLSPinnedCerts) {
-		protoToPinned[WS] = curOpts.Websocket.TLSPinnedCerts
-	}
+
 	for _, c := range s.clients {
 		if c.kind != CLIENT {
 			continue
@@ -733,26 +583,7 @@ func (s *Server) recheckPinnedCerts(curOpts *Options, newOpts *Options) {
 			}
 		}
 	}
-	checkClients := func(kind int, clients map[uint64]*client, set PinnedCertSet) {
-		for _, c := range clients {
-			if c.kind == kind && !c.matchesPinnedCert(set) {
-				disconnectClients = append(disconnectClients, c)
-			}
-		}
-	}
-	if !reflect.DeepEqual(newOpts.LeafNode.TLSPinnedCerts, curOpts.LeafNode.TLSPinnedCerts) {
-		checkClients(LEAF, s.leafs, newOpts.LeafNode.TLSPinnedCerts)
-	}
-	if !reflect.DeepEqual(newOpts.Cluster.TLSPinnedCerts, curOpts.Cluster.TLSPinnedCerts) {
-		checkClients(ROUTER, s.routes, newOpts.Cluster.TLSPinnedCerts)
-	}
-	if reflect.DeepEqual(newOpts.Gateway.TLSPinnedCerts, curOpts.Gateway.TLSPinnedCerts) {
-		for _, c := range s.remotes {
-			if !c.matchesPinnedCert(newOpts.Gateway.TLSPinnedCerts) {
-				disconnectClients = append(disconnectClients, c)
-			}
-		}
-	}
+
 	s.mu.Unlock()
 	if len(disconnectClients) > 0 {
 		s.Noticef("Disconnect %d clients due to pinned certs reload", len(disconnectClients))
@@ -795,11 +626,6 @@ func (s *Server) ReloadOptions(newOpts *Options) error {
 	}
 
 	clientOrgPort := curOpts.Port
-	clusterOrgPort := curOpts.Cluster.Port
-	gatewayOrgPort := curOpts.Gateway.Port
-	leafnodesOrgPort := curOpts.LeafNode.Port
-	websocketOrgPort := curOpts.Websocket.Port
-	mqttOrgPort := curOpts.MQTT.Port
 
 	s.mu.Unlock()
 
@@ -818,22 +644,6 @@ func (s *Server) ReloadOptions(newOpts *Options) error {
 	// created.
 	if newOpts.Port == 0 {
 		newOpts.Port = clientOrgPort
-	}
-	// We don't do that for cluster, so check against -1.
-	if newOpts.Cluster.Port == -1 {
-		newOpts.Cluster.Port = clusterOrgPort
-	}
-	if newOpts.Gateway.Port == -1 {
-		newOpts.Gateway.Port = gatewayOrgPort
-	}
-	if newOpts.LeafNode.Port == -1 {
-		newOpts.LeafNode.Port = leafnodesOrgPort
-	}
-	if newOpts.Websocket.Port == -1 {
-		newOpts.Websocket.Port = websocketOrgPort
-	}
-	if newOpts.MQTT.Port == -1 {
-		newOpts.MQTT.Port = mqttOrgPort
 	}
 
 	if err := s.reloadOptions(curOpts, newOpts); err != nil {
@@ -893,11 +703,9 @@ func (s *Server) reloadOptions(curOpts, newOpts *Options) error {
 		}
 	}
 
-	// Create a context that is used to pass special info that we may need
 	// while applying the new options.
-	ctx := reloadContext{oldClusterPerms: curOpts.Cluster.Permissions}
 	s.setOpts(newOpts)
-	s.applyOptions(&ctx, changed)
+	s.applyOptions(changed)
 	return nil
 }
 
@@ -931,14 +739,8 @@ func imposeOrder(value interface{}) error {
 		sort.Slice(value, func(i, j int) bool {
 			return value[i].Issuer < value[j].Issuer
 		})
-	case GatewayOpts:
-		sort.Slice(value.Gateways, func(i, j int) bool {
-			return value.Gateways[i].Name < value.Gateways[j].Name
-		})
-	case WebsocketOpts:
-		sort.Strings(value.AllowedOrigins)
-	case string, bool, uint8, int, int32, int64, time.Duration, float64, nil, LeafNodeOpts, ClusterOpts, *tls.Config, PinnedCertSet,
-		*URLAccResolver, *MemAccResolver, *DirAccResolver, *CacheDirAccResolver, Authentication, MQTTOpts, jwt.TagList,
+	case string, bool, uint8, int, int32, int64, time.Duration, float64, nil, *tls.Config, PinnedCertSet,
+		*URLAccResolver, *MemAccResolver, *DirAccResolver, *CacheDirAccResolver, Authentication, jwt.TagList,
 		*OCSPConfig, map[string]string, JSLimitOpts, StoreCipher:
 		// explicitly skipped types
 	default:
@@ -1034,17 +836,6 @@ func (s *Server) diffOptions(newOpts *Options) ([]option, error) {
 			diffOpts = append(diffOpts, &usersOption{})
 		case "nkeys":
 			diffOpts = append(diffOpts, &nkeysOption{})
-		case "cluster":
-			newClusterOpts := newValue.(ClusterOpts)
-			oldClusterOpts := oldValue.(ClusterOpts)
-			if err := validateClusterOpts(oldClusterOpts, newClusterOpts); err != nil {
-				return nil, err
-			}
-			permsChanged := !reflect.DeepEqual(newClusterOpts.Permissions, oldClusterOpts.Permissions)
-			diffOpts = append(diffOpts, &clusterOption{newValue: newClusterOpts, permsChanged: permsChanged})
-		case "routes":
-			add, remove := diffRoutes(oldValue.([]*url.URL), newValue.([]*url.URL))
-			diffOpts = append(diffOpts, &routesOption{add: add, remove: remove})
 		case "maxconn":
 			diffOpts = append(diffOpts, &maxConnOption{newValue: newValue.(int)})
 		case "pidfile":
@@ -1081,127 +872,6 @@ func (s *Server) diffOptions(newOpts *Options) ([]option, error) {
 			diffOpts = append(diffOpts, &accountsOption{})
 		case "accountresolvertlsconfig":
 			diffOpts = append(diffOpts, &accountsOption{})
-		case "gateway":
-			// Not supported for now, but report warning if configuration of gateway
-			// is actually changed so that user knows that it won't take effect.
-
-			// Any deep-equal is likely to fail for when there is a TLSConfig. so
-			// remove for the test.
-			tmpOld := oldValue.(GatewayOpts)
-			tmpNew := newValue.(GatewayOpts)
-			tmpOld.TLSConfig = nil
-			tmpNew.TLSConfig = nil
-			tmpOld.tlsConfigOpts = nil
-			tmpNew.tlsConfigOpts = nil
-
-			// Need to do the same for remote gateways' TLS configs.
-			// But we can't just set remotes' TLSConfig to nil otherwise this
-			// would lose the real TLS configuration.
-			tmpOld.Gateways = copyRemoteGWConfigsWithoutTLSConfig(tmpOld.Gateways)
-			tmpNew.Gateways = copyRemoteGWConfigsWithoutTLSConfig(tmpNew.Gateways)
-
-			// If there is really a change prevents reload.
-			if !reflect.DeepEqual(tmpOld, tmpNew) {
-				// See TODO(ik) note below about printing old/new values.
-				return nil, fmt.Errorf("config reload not supported for %s: old=%v, new=%v",
-					field.Name, oldValue, newValue)
-			}
-		case "leafnode":
-			// Similar to gateways
-			tmpOld := oldValue.(LeafNodeOpts)
-			tmpNew := newValue.(LeafNodeOpts)
-			tmpOld.TLSConfig = nil
-			tmpNew.TLSConfig = nil
-			tmpOld.tlsConfigOpts = nil
-			tmpNew.tlsConfigOpts = nil
-
-			// Need to do the same for remote leafnodes' TLS configs.
-			// But we can't just set remotes' TLSConfig to nil otherwise this
-			// would lose the real TLS configuration.
-			tmpOld.Remotes = copyRemoteLNConfigForReloadCompare(tmpOld.Remotes)
-			tmpNew.Remotes = copyRemoteLNConfigForReloadCompare(tmpNew.Remotes)
-
-			// Special check for leafnode remotes changes which are not supported right now.
-			leafRemotesChanged := func(a, b LeafNodeOpts) bool {
-				if len(a.Remotes) != len(b.Remotes) {
-					return true
-				}
-
-				// Check whether all remotes URLs are still the same.
-				for _, oldRemote := range a.Remotes {
-					var found bool
-
-					if oldRemote.LocalAccount == _EMPTY_ {
-						oldRemote.LocalAccount = globalAccountName
-					}
-
-					for _, newRemote := range b.Remotes {
-						// Bind to global account in case not defined.
-						if newRemote.LocalAccount == _EMPTY_ {
-							newRemote.LocalAccount = globalAccountName
-						}
-
-						if reflect.DeepEqual(oldRemote, newRemote) {
-							found = true
-							break
-						}
-					}
-					if !found {
-						return true
-					}
-				}
-
-				return false
-			}
-
-			// First check whether remotes changed at all. If they did not,
-			// skip them in the complete equal check.
-			if !leafRemotesChanged(tmpOld, tmpNew) {
-				tmpOld.Remotes = nil
-				tmpNew.Remotes = nil
-			}
-
-			// Special check for auth users to detect changes.
-			// If anything is off will fall through and fail below.
-			// If we detect they are semantically the same we nil them out
-			// to pass the check below.
-			if tmpOld.Users != nil || tmpNew.Users != nil {
-				if len(tmpOld.Users) == len(tmpNew.Users) {
-					oua := make(map[string]*User, len(tmpOld.Users))
-					nua := make(map[string]*User, len(tmpOld.Users))
-					for _, u := range tmpOld.Users {
-						oua[u.Username] = u
-					}
-					for _, u := range tmpNew.Users {
-						nua[u.Username] = u
-					}
-					same := true
-					for uname, u := range oua {
-						// If we can not find new one with same name, drop through to fail.
-						nu, ok := nua[uname]
-						if !ok {
-							same = false
-							break
-						}
-						// If username or password or account different break.
-						if u.Username != nu.Username || u.Password != nu.Password || u.Account.GetName() != nu.Account.GetName() {
-							same = false
-							break
-						}
-					}
-					// We can nil out here.
-					if same {
-						tmpOld.Users, tmpNew.Users = nil, nil
-					}
-				}
-			}
-
-			// If there is really a change prevents reload.
-			if !reflect.DeepEqual(tmpOld, tmpNew) {
-				// See TODO(ik) note below about printing old/new values.
-				return nil, fmt.Errorf("config reload not supported for %s: old=%v, new=%v",
-					field.Name, oldValue, newValue)
-			}
 		case "jetstream":
 			new := newValue.(bool)
 			old := oldValue.(bool)
@@ -1259,46 +929,7 @@ func (s *Server) diffOptions(newOpts *Options) ([]option, error) {
 					return nil, fmt.Errorf("config reload not supported for jetstream max memory and store")
 				}
 			}
-		case "websocket":
-			// Similar to gateways
-			tmpOld := oldValue.(WebsocketOpts)
-			tmpNew := newValue.(WebsocketOpts)
-			tmpOld.TLSConfig = nil
-			tmpNew.TLSConfig = nil
-			// If there is really a change prevents reload.
-			if !reflect.DeepEqual(tmpOld, tmpNew) {
-				// See TODO(ik) note below about printing old/new values.
-				return nil, fmt.Errorf("config reload not supported for %s: old=%v, new=%v",
-					field.Name, oldValue, newValue)
-			}
-		case "mqtt":
-			diffOpts = append(diffOpts, &mqttAckWaitReload{newValue: newValue.(MQTTOpts).AckWait})
-			diffOpts = append(diffOpts, &mqttMaxAckPendingReload{newValue: newValue.(MQTTOpts).MaxAckPending})
-			diffOpts = append(diffOpts, &mqttStreamReplicasReload{newValue: newValue.(MQTTOpts).StreamReplicas})
-			diffOpts = append(diffOpts, &mqttConsumerReplicasReload{newValue: newValue.(MQTTOpts).ConsumerReplicas})
-			diffOpts = append(diffOpts, &mqttConsumerMemoryStorageReload{newValue: newValue.(MQTTOpts).ConsumerMemoryStorage})
-			diffOpts = append(diffOpts, &mqttInactiveThresholdReload{newValue: newValue.(MQTTOpts).ConsumerInactiveThreshold})
 
-			// Nil out/set to 0 the options that we allow to be reloaded so that
-			// we only fail reload if some that we don't support are changed.
-			tmpOld := oldValue.(MQTTOpts)
-			tmpNew := newValue.(MQTTOpts)
-			tmpOld.TLSConfig, tmpOld.AckWait, tmpOld.MaxAckPending, tmpOld.StreamReplicas, tmpOld.ConsumerReplicas, tmpOld.ConsumerMemoryStorage = nil, 0, 0, 0, 0, false
-			tmpOld.ConsumerInactiveThreshold = 0
-			tmpNew.TLSConfig, tmpNew.AckWait, tmpNew.MaxAckPending, tmpNew.StreamReplicas, tmpNew.ConsumerReplicas, tmpNew.ConsumerMemoryStorage = nil, 0, 0, 0, 0, false
-			tmpNew.ConsumerInactiveThreshold = 0
-
-			if !reflect.DeepEqual(tmpOld, tmpNew) {
-				// See TODO(ik) note below about printing old/new values.
-				return nil, fmt.Errorf("config reload not supported for %s: old=%v, new=%v",
-					field.Name, oldValue, newValue)
-			}
-			tmpNew.AckWait = newValue.(MQTTOpts).AckWait
-			tmpNew.MaxAckPending = newValue.(MQTTOpts).MaxAckPending
-			tmpNew.StreamReplicas = newValue.(MQTTOpts).StreamReplicas
-			tmpNew.ConsumerReplicas = newValue.(MQTTOpts).ConsumerReplicas
-			tmpNew.ConsumerMemoryStorage = newValue.(MQTTOpts).ConsumerMemoryStorage
-			tmpNew.ConsumerInactiveThreshold = newValue.(MQTTOpts).ConsumerInactiveThreshold
 		case "connecterrorreports":
 			diffOpts = append(diffOpts, &connectErrorReports{newValue: newValue.(int)})
 		case "reconnecterrorreports":
@@ -1363,47 +994,10 @@ func (s *Server) diffOptions(newOpts *Options) ([]option, error) {
 	return diffOpts, nil
 }
 
-func copyRemoteGWConfigsWithoutTLSConfig(current []*RemoteGatewayOpts) []*RemoteGatewayOpts {
-	l := len(current)
-	if l == 0 {
-		return nil
-	}
-	rgws := make([]*RemoteGatewayOpts, 0, l)
-	for _, rcfg := range current {
-		cp := *rcfg
-		cp.TLSConfig = nil
-		cp.tlsConfigOpts = nil
-		rgws = append(rgws, &cp)
-	}
-	return rgws
-}
-
-func copyRemoteLNConfigForReloadCompare(current []*RemoteLeafOpts) []*RemoteLeafOpts {
-	l := len(current)
-	if l == 0 {
-		return nil
-	}
-	rlns := make([]*RemoteLeafOpts, 0, l)
-	for _, rcfg := range current {
-		cp := *rcfg
-		cp.TLSConfig = nil
-		cp.tlsConfigOpts = nil
-		// This is set only when processing a CONNECT, so reset here so that we
-		// don't fail the DeepEqual comparison.
-		cp.TLS = false
-		// For now, remove DenyImports/Exports since those get modified at runtime
-		// to add JS APIs.
-		cp.DenyImports, cp.DenyExports = nil, nil
-		rlns = append(rlns, &cp)
-	}
-	return rlns
-}
-
-func (s *Server) applyOptions(ctx *reloadContext, opts []option) {
+func (s *Server) applyOptions(opts []option) {
 	var (
 		reloadLogging      = false
 		reloadAuth         = false
-		reloadClusterPerms = false
 		reloadClientTrcLvl = false
 		reloadJetstream    = false
 		jsEnabled          = false
@@ -1424,9 +1018,6 @@ func (s *Server) applyOptions(ctx *reloadContext, opts []option) {
 		if opt.IsTLSChange() {
 			reloadTLS = true
 		}
-		if opt.IsClusterPermsChange() {
-			reloadClusterPerms = true
-		}
 		if opt.IsJetStreamChange() {
 			reloadJetstream = true
 			jsEnabled = opt.(*jetStreamOption).newValue
@@ -1445,9 +1036,6 @@ func (s *Server) applyOptions(ctx *reloadContext, opts []option) {
 	if reloadAuth {
 		s.reloadAuthorization()
 	}
-	if reloadClusterPerms {
-		s.reloadClusterPermissions(ctx.oldClusterPerms)
-	}
 
 	if reloadJetstream {
 		if !jsEnabled {
@@ -1462,17 +1050,6 @@ func (s *Server) applyOptions(ctx *reloadContext, opts []option) {
 	}
 	if isStatszChange {
 		s.sendStatszUpdate()
-	}
-
-	// For remote gateways and leafnodes, make sure that their TLS configuration
-	// is updated (since the config is "captured" early and changes would otherwise
-	// not be visible).
-	newOpts := s.getOpts()
-	if s.gateway.enabled {
-		s.gateway.updateRemotesTLSConfig(newOpts)
-	}
-	if len(newOpts.LeafNode.Remotes) > 0 {
-		s.updateRemoteLeafNodesTLSConfig(newOpts)
 	}
 
 	if reloadTLS {
@@ -1512,12 +1089,8 @@ func (s *Server) reloadClientTraceLevel() {
 	// Update their trace level when not holding server or gateway lock
 
 	s.mu.Lock()
-	clientCnt := 1 + len(s.clients) + len(s.grTmpClients) + len(s.routes) + len(s.leafs)
+	clientCnt := 1 + len(s.clients) + len(s.grTmpClients)
 	s.mu.Unlock()
-
-	s.gateway.RLock()
-	clientCnt += len(s.gateway.in) + len(s.gateway.outo)
-	s.gateway.RUnlock()
 
 	clients := make([]*client, 0, clientCnt)
 
@@ -1526,20 +1099,13 @@ func (s *Server) reloadClientTraceLevel() {
 		clients = append(clients, s.sys.client)
 	}
 
-	cMaps := []map[uint64]*client{s.clients, s.grTmpClients, s.routes, s.leafs}
+	cMaps := []map[uint64]*client{s.clients, s.grTmpClients}
 	for _, m := range cMaps {
 		for _, c := range m {
 			clients = append(clients, c)
 		}
 	}
 	s.mu.Unlock()
-
-	s.gateway.RLock()
-	for _, c := range s.gateway.in {
-		clients = append(clients, c)
-	}
-	clients = append(clients, s.gateway.outo...)
-	s.gateway.RUnlock()
 
 	for _, c := range clients {
 		// client.trace is commonly read while holding the lock
@@ -1631,8 +1197,6 @@ func (s *Server) reloadAuthorization() {
 		cclients  = cclientsa[:0]
 		clientsa  [64]*client
 		clients   = clientsa[:0]
-		routesa   [64]*client
-		routes    = routesa[:0]
 	)
 
 	// Gather clients that changed accounts. We will close them and they
@@ -1644,9 +1208,7 @@ func (s *Server) reloadAuthorization() {
 			clients = append(clients, client)
 		}
 	}
-	for _, route := range s.routes {
-		routes = append(routes, route)
-	}
+
 	// Check here for any system/internal clients which will not be in the servers map of normal clients.
 	if s.sys != nil && s.sys.account != nil && !opts.NoSystemAccount {
 		s.accounts.Store(s.sys.account.Name, s.sys.account)
@@ -1658,7 +1220,7 @@ func (s *Server) reloadAuthorization() {
 		// Check for sysclients accounting, ignore the system account.
 		if acc.sysclients > 0 && (s.sys == nil || s.sys.account != acc) {
 			for c := range acc.clients {
-				if c.kind != CLIENT && c.kind != LEAF {
+				if c.kind != CLIENT {
 					clients = append(clients, c)
 				}
 			}
@@ -1690,9 +1252,6 @@ func (s *Server) reloadAuthorization() {
 		resetCh <- struct{}{}
 	}
 
-	// Check that publish retained messages sources are still allowed to publish.
-	s.mqttCheckPubRetainedPerms()
-
 	// Close clients that have moved accounts
 	for _, client := range cclients {
 		client.closeConnection(ClientClosed)
@@ -1701,7 +1260,7 @@ func (s *Server) reloadAuthorization() {
 	for _, c := range clients {
 		// Disconnect any unauthorized clients.
 		// Ignore internal clients.
-		if (c.kind == CLIENT || c.kind == LEAF) && !s.isClientAuthorized(c) {
+		if c.kind == CLIENT && !s.isClientAuthorized(c) {
 			c.authViolation()
 			continue
 		}
@@ -1709,17 +1268,6 @@ func (s *Server) reloadAuthorization() {
 		c.swapAccountAfterReload()
 		// Remove any unauthorized subscriptions and check for account imports.
 		c.processSubsOnConfigReload(awcsti)
-	}
-
-	for _, route := range routes {
-		// Disconnect any unauthorized routes.
-		// Do this only for routes that were accepted, not initiated
-		// because in the later case, we don't have the user name/password
-		// of the remote server.
-		if !route.isSolicitedRoute() && !s.isRouterAuthorized(route) {
-			route.setNoReconnect()
-			route.authViolation()
-		}
 	}
 
 	if res := s.AccountResolver(); res != nil {
@@ -1768,169 +1316,4 @@ func (s *Server) clientHasMovedToDifferentAccount(c *client) bool {
 	}
 	// user/nkey no longer exists.
 	return true
-}
-
-// reloadClusterPermissions reconfigures the cluster's permssions
-// and set the permissions to all existing routes, sending an
-// update INFO protocol so that remote can resend their local
-// subs if needed, and sending local subs matching cluster's
-// import subjects.
-func (s *Server) reloadClusterPermissions(oldPerms *RoutePermissions) {
-	s.mu.Lock()
-	var (
-		infoJSON     []byte
-		newPerms     = s.opts.Cluster.Permissions
-		routes       = make(map[uint64]*client, len(s.routes))
-		withNewProto int
-	)
-	// Get all connected routes
-	for i, route := range s.routes {
-		// Count the number of routes that can understand receiving INFO updates.
-		route.mu.Lock()
-		if route.opts.Protocol >= RouteProtoInfo {
-			withNewProto++
-		}
-		route.mu.Unlock()
-		routes[i] = route
-	}
-	// If new permissions is nil, then clear routeInfo import/export
-	if newPerms == nil {
-		s.routeInfo.Import = nil
-		s.routeInfo.Export = nil
-	} else {
-		s.routeInfo.Import = newPerms.Import
-		s.routeInfo.Export = newPerms.Export
-	}
-	// Regenerate route INFO
-	s.generateRouteInfoJSON()
-	infoJSON = s.routeInfoJSON
-	gacc := s.gacc
-	s.mu.Unlock()
-
-	// If there were no route, we are done
-	if len(routes) == 0 {
-		return
-	}
-
-	// If only older servers, simply close all routes and they will do the right
-	// thing on reconnect.
-	if withNewProto == 0 {
-		for _, route := range routes {
-			route.closeConnection(RouteRemoved)
-		}
-		return
-	}
-
-	// Fake clients to test cluster permissions
-	oldPermsTester := &client{}
-	oldPermsTester.setRoutePermissions(oldPerms)
-	newPermsTester := &client{}
-	newPermsTester.setRoutePermissions(newPerms)
-
-	var (
-		_localSubs       [4096]*subscription
-		localSubs        = _localSubs[:0]
-		subsNeedSUB      []*subscription
-		subsNeedUNSUB    []*subscription
-		deleteRoutedSubs []*subscription
-	)
-	// FIXME(dlc) - Change for accounts.
-	gacc.sl.localSubs(&localSubs, false)
-
-	// Go through all local subscriptions
-	for _, sub := range localSubs {
-		// Get all subs that can now be imported
-		subj := string(sub.subject)
-		couldImportThen := oldPermsTester.canImport(subj)
-		canImportNow := newPermsTester.canImport(subj)
-		if canImportNow {
-			// If we could not before, then will need to send a SUB protocol.
-			if !couldImportThen {
-				subsNeedSUB = append(subsNeedSUB, sub)
-			}
-		} else if couldImportThen {
-			// We were previously able to import this sub, but now
-			// we can't so we need to send an UNSUB protocol
-			subsNeedUNSUB = append(subsNeedUNSUB, sub)
-		}
-	}
-
-	for _, route := range routes {
-		route.mu.Lock()
-		// If route is to older server, simply close connection.
-		if route.opts.Protocol < RouteProtoInfo {
-			route.mu.Unlock()
-			route.closeConnection(RouteRemoved)
-			continue
-		}
-		route.setRoutePermissions(newPerms)
-		for _, sub := range route.subs {
-			// If we can't export, we need to drop the subscriptions that
-			// we have on behalf of this route.
-			subj := string(sub.subject)
-			if !route.canExport(subj) {
-				delete(route.subs, string(sub.sid))
-				deleteRoutedSubs = append(deleteRoutedSubs, sub)
-			}
-		}
-		// Send an update INFO, which will allow remote server to show
-		// our current route config in monitoring and resend subscriptions
-		// that we now possibly allow with a change of Export permissions.
-		route.enqueueProto(infoJSON)
-		// Now send SUB and UNSUB protocols as needed.
-		route.sendRouteSubProtos(subsNeedSUB, false, nil)
-		route.sendRouteUnSubProtos(subsNeedUNSUB, false, nil)
-		route.mu.Unlock()
-	}
-	// Remove as a batch all the subs that we have removed from each route.
-	// FIXME(dlc) - Change for accounts.
-	gacc.sl.RemoveBatch(deleteRoutedSubs)
-}
-
-// validateClusterOpts ensures the new ClusterOpts does not change host or
-// port, which do not support reload.
-func validateClusterOpts(old, new ClusterOpts) error {
-	if old.Host != new.Host {
-		return fmt.Errorf("config reload not supported for cluster host: old=%s, new=%s",
-			old.Host, new.Host)
-	}
-	if old.Port != new.Port {
-		return fmt.Errorf("config reload not supported for cluster port: old=%d, new=%d",
-			old.Port, new.Port)
-	}
-	// Validate Cluster.Advertise syntax
-	if new.Advertise != "" {
-		if _, _, err := parseHostPort(new.Advertise, 0); err != nil {
-			return fmt.Errorf("invalid Cluster.Advertise value of %s, err=%v", new.Advertise, err)
-		}
-	}
-	return nil
-}
-
-// diffRoutes diffs the old routes and the new routes and returns the ones that
-// should be added and removed from the server.
-func diffRoutes(old, new []*url.URL) (add, remove []*url.URL) {
-	// Find routes to remove.
-removeLoop:
-	for _, oldRoute := range old {
-		for _, newRoute := range new {
-			if urlsAreEqual(oldRoute, newRoute) {
-				continue removeLoop
-			}
-		}
-		remove = append(remove, oldRoute)
-	}
-
-	// Find routes to add.
-addLoop:
-	for _, newRoute := range new {
-		for _, oldRoute := range old {
-			if urlsAreEqual(oldRoute, newRoute) {
-				continue addLoop
-			}
-		}
-		add = append(add, newRoute)
-	}
-
-	return add, remove
 }

@@ -165,7 +165,6 @@ type AccountNumConns struct {
 type AccountStat struct {
 	Account       string    `json:"acc"`
 	Conns         int       `json:"conns"`
-	LeafNodes     int       `json:"leafnodes"`
 	TotalConns    int       `json:"total_conns"`
 	Sent          DataStats `json:"sent"`
 	Received      DataStats `json:"received"`
@@ -186,7 +185,6 @@ type ServerInfo struct {
 	Name      string    `json:"name"`
 	Host      string    `json:"host"`
 	ID        string    `json:"id"`
-	Cluster   string    `json:"cluster,omitempty"`
 	Domain    string    `json:"domain,omitempty"`
 	Version   string    `json:"ver"`
 	Tags      []string  `json:"tags,omitempty"`
@@ -208,7 +206,6 @@ type ClientInfo struct {
 	Version    string        `json:"ver,omitempty"`
 	RTT        time.Duration `json:"rtt,omitempty"`
 	Server     string        `json:"server,omitempty"`
-	Cluster    string        `json:"cluster,omitempty"`
 	Alternates []string      `json:"alts,omitempty"`
 	Stop       *time.Time    `json:"stop,omitempty"`
 	Jwt        string        `json:"jwt,omitempty"`
@@ -217,7 +214,6 @@ type ClientInfo struct {
 	Tags       jwt.TagList   `json:"tags,omitempty"`
 	Kind       string        `json:"kind,omitempty"`
 	ClientType string        `json:"client_type,omitempty"`
-	MQTTClient string        `json:"client_id,omitempty"` // This is the MQTT client ID
 }
 
 // ServerStats hold various statistics that we will periodically send out.
@@ -233,28 +229,8 @@ type ServerStats struct {
 	Sent             DataStats      `json:"sent"`
 	Received         DataStats      `json:"received"`
 	SlowConsumers    int64          `json:"slow_consumers"`
-	Routes           []*RouteStat   `json:"routes,omitempty"`
-	Gateways         []*GatewayStat `json:"gateways,omitempty"`
 	ActiveServers    int            `json:"active_servers,omitempty"`
 	JetStream        *JetStreamVarz `json:"jetstream,omitempty"`
-}
-
-// RouteStat holds route statistics.
-type RouteStat struct {
-	ID       uint64    `json:"rid"`
-	Name     string    `json:"name,omitempty"`
-	Sent     DataStats `json:"sent"`
-	Received DataStats `json:"received"`
-	Pending  int       `json:"pending"`
-}
-
-// GatewayStat holds gateway statistics.
-type GatewayStat struct {
-	ID         uint64    `json:"gwid"`
-	Name       string    `json:"name"`
-	Sent       DataStats `json:"sent"`
-	Received   DataStats `json:"received"`
-	NumInbound int       `json:"inbound_connections"`
 }
 
 // DataStats reports how may msg and bytes. Applicable for both sent and received.
@@ -364,10 +340,7 @@ RESET:
 	domain := s.info.Domain
 	seqp := &s.sys.seq
 	js := s.info.JetStream
-	cluster := s.info.Cluster
-	if s.gateway.enabled {
-		cluster = s.getGatewayName()
-	}
+
 	s.mu.RUnlock()
 
 	// Grab tags.
@@ -382,7 +355,6 @@ RESET:
 					pm.si.Name = servername
 					pm.si.Domain = domain
 					pm.si.Host = host
-					pm.si.Cluster = cluster
 					pm.si.ID = id
 					pm.si.Seq = atomic.AddUint64(seqp, 1)
 					pm.si.Version = VERSION
@@ -649,31 +621,6 @@ func (s *Server) updateServerUsage(v *ServerStats) {
 	v.Cores = runtime.NumCPU()
 }
 
-// Generate a route stat for our statz update.
-func routeStat(r *client) *RouteStat {
-	if r == nil {
-		return nil
-	}
-	r.mu.Lock()
-	rs := &RouteStat{
-		ID: r.cid,
-		Sent: DataStats{
-			Msgs:  atomic.LoadInt64(&r.outMsgs),
-			Bytes: atomic.LoadInt64(&r.outBytes),
-		},
-		Received: DataStats{
-			Msgs:  atomic.LoadInt64(&r.inMsgs),
-			Bytes: atomic.LoadInt64(&r.inBytes),
-		},
-		Pending: int(r.out.pb),
-	}
-	if r.route != nil {
-		rs.Name = r.route.remoteName
-	}
-	r.mu.Unlock()
-	return rs
-}
-
 // Actual send method for statz updates.
 // Lock should be held.
 func (s *Server) sendStatsz(subj string) {
@@ -715,38 +662,7 @@ func (s *Server) sendStatsz(subj string) {
 	m.Stats.Sent.Bytes = atomic.LoadInt64(&s.outBytes)
 	m.Stats.SlowConsumers = atomic.LoadInt64(&s.slowConsumers)
 	m.Stats.NumSubs = s.numSubscriptions()
-	// Routes
-	for _, r := range s.routes {
-		m.Stats.Routes = append(m.Stats.Routes, routeStat(r))
-	}
-	// Gateways
-	if s.gateway.enabled {
-		gw := s.gateway
-		gw.RLock()
-		for name, c := range gw.out {
-			gs := &GatewayStat{Name: name}
-			c.mu.Lock()
-			gs.ID = c.cid
-			gs.Sent = DataStats{
-				Msgs:  atomic.LoadInt64(&c.outMsgs),
-				Bytes: atomic.LoadInt64(&c.outBytes),
-			}
-			c.mu.Unlock()
-			// Gather matching inbound connections
-			gs.Received = DataStats{}
-			for _, c := range gw.in {
-				c.mu.Lock()
-				if c.gw.name == name {
-					gs.Received.Msgs += atomic.LoadInt64(&c.inMsgs)
-					gs.Received.Bytes += atomic.LoadInt64(&c.inBytes)
-					gs.NumInbound++
-				}
-				c.mu.Unlock()
-			}
-			m.Stats.Gateways = append(m.Stats.Gateways, gs)
-		}
-		gw.RUnlock()
-	}
+
 	// Active Servers
 	m.Stats.ActiveServers = len(s.sys.servers) + 1
 
@@ -939,18 +855,6 @@ func (s *Server) initEventTracking() {
 			optz := &ConnzEventOptions{}
 			s.zReq(c, reply, hdr, msg, &optz.EventFilterOptions, optz, func() (interface{}, error) { return s.Connz(&optz.ConnzOptions) })
 		},
-		"ROUTEZ": func(sub *subscription, c *client, _ *Account, subject, reply string, hdr, msg []byte) {
-			optz := &RoutezEventOptions{}
-			s.zReq(c, reply, hdr, msg, &optz.EventFilterOptions, optz, func() (interface{}, error) { return s.Routez(&optz.RoutezOptions) })
-		},
-		"GATEWAYZ": func(sub *subscription, c *client, _ *Account, subject, reply string, hdr, msg []byte) {
-			optz := &GatewayzEventOptions{}
-			s.zReq(c, reply, hdr, msg, &optz.EventFilterOptions, optz, func() (interface{}, error) { return s.Gatewayz(&optz.GatewayzOptions) })
-		},
-		"LEAFZ": func(sub *subscription, c *client, _ *Account, subject, reply string, hdr, msg []byte) {
-			optz := &LeafzEventOptions{}
-			s.zReq(c, reply, hdr, msg, &optz.EventFilterOptions, optz, func() (interface{}, error) { return s.Leafz(&optz.LeafzOptions) })
-		},
 		"ACCOUNTZ": func(sub *subscription, c *client, _ *Account, subject, reply string, hdr, msg []byte) {
 			optz := &AccountzEventOptions{}
 			s.zReq(c, reply, hdr, msg, &optz.EventFilterOptions, optz, func() (interface{}, error) { return s.Accountz(&optz.AccountzOptions) })
@@ -1002,17 +906,6 @@ func (s *Server) initEventTracking() {
 				} else {
 					optz.ConnzOptions.Account = acc
 					return s.Connz(&optz.ConnzOptions)
-				}
-			})
-		},
-		"LEAFZ": func(sub *subscription, c *client, _ *Account, subject, reply string, hdr, msg []byte) {
-			optz := &LeafzEventOptions{}
-			s.zReq(c, reply, hdr, msg, &optz.EventFilterOptions, optz, func() (interface{}, error) {
-				if acc, err := extractAccount(c, subject, msg); err != nil {
-					return nil, err
-				} else {
-					optz.LeafzOptions.Account = acc
-					return s.Leafz(&optz.LeafzOptions)
 				}
 			})
 		},
@@ -1084,12 +977,6 @@ func (s *Server) initEventTracking() {
 		s.Errorf("Error setting up internal tracking: %v", err)
 	}
 
-	// Listen for updates when leaf nodes connect for a given account. This will
-	// force any gateway connections to move to `modeInterestOnly`
-	subject = fmt.Sprintf(leafNodeConnectEventSubj, "*")
-	if _, err := s.sysSubscribe(subject, s.noInlineCallback(s.leafNodeConnected)); err != nil {
-		s.Errorf("Error setting up internal tracking: %v", err)
-	}
 	// For tracking remote latency measurements.
 	subject = fmt.Sprintf(remoteLatencyEventSubj, s.sys.shash)
 	if _, err := s.sysSubscribe(subject, s.noInlineCallback(s.remoteLatencyUpdate)); err != nil {
@@ -1295,7 +1182,6 @@ func (s *Server) remoteServerUpdate(sub *subscription, c *client, _ *Account, su
 	s.nodeToInfo.Store(node, nodeInfo{
 		si.Name,
 		si.Version,
-		si.Cluster,
 		si.Domain,
 		si.ID,
 		si.Tags,
@@ -1328,40 +1214,17 @@ func (s *Server) updateRemoteServer(si *ServerInfo) {
 // processNewServer will hold any logic we want to use when we discover a new server.
 // Lock should be held upon entry.
 func (s *Server) processNewServer(si *ServerInfo) {
-	// Right now we only check if we have leafnode servers and if so send another
-	// connect update to make sure they switch this account to interest only mode.
-	s.ensureGWsInterestOnlyForLeafNodes()
-
 	// Add to our nodeToName
 	if s.sameDomain(si.Domain) {
 		node := getHash(si.Name)
 		// Only update if non-existent
 		if _, ok := s.nodeToInfo.Load(node); !ok {
-			s.nodeToInfo.Store(node, nodeInfo{si.Name, si.Version, si.Cluster, si.Domain, si.ID, si.Tags, nil, nil, false, si.JetStream})
+			s.nodeToInfo.Store(node, nodeInfo{si.Name, si.Version, si.Domain, si.ID, si.Tags, nil, nil, false, si.JetStream})
 		}
 	}
 	// Announce ourselves..
 	// Do this in a separate Go routine.
 	go s.sendStatszUpdate()
-}
-
-// If GW is enabled on this server and there are any leaf node connections,
-// this function will send a LeafNode connect system event to the super cluster
-// to ensure that the GWs are in interest-only mode for this account.
-// Lock should be held upon entry.
-// TODO(dlc) - this will cause this account to be loaded on all servers. Need a better
-// way with GW2.
-func (s *Server) ensureGWsInterestOnlyForLeafNodes() {
-	if !s.gateway.enabled || len(s.leafs) == 0 {
-		return
-	}
-	sent := make(map[*Account]bool, len(s.leafs))
-	for _, c := range s.leafs {
-		if !sent[c.acc] {
-			s.sendLeafNodeConnectMsg(c.acc.Name)
-			sent[c.acc] = true
-		}
-	}
 }
 
 // shutdownEventing will clean up all eventing state.
@@ -1433,27 +1296,6 @@ func (s *Server) connsRequest(sub *subscription, c *client, _ *Account, subject,
 	}
 }
 
-// leafNodeConnected is an event we will receive when a leaf node for a given account connects.
-func (s *Server) leafNodeConnected(sub *subscription, _ *client, _ *Account, subject, reply string, hdr, msg []byte) {
-	m := accNumConnsReq{}
-	if err := json.Unmarshal(msg, &m); err != nil {
-		s.sys.client.Errorf("Error unmarshalling account connections request message: %v", err)
-		return
-	}
-
-	s.mu.RLock()
-	na := m.Account == _EMPTY_ || !s.eventsEnabled() || !s.gateway.enabled
-	s.mu.RUnlock()
-
-	if na {
-		return
-	}
-
-	if acc, _ := s.lookupAccount(m.Account); acc != nil {
-		s.switchAccountToInterestMode(acc.Name)
-	}
-}
-
 // Common filter options for system requests STATSZ VARZ SUBSZ CONNZ ROUTEZ GATEWAYZ LEAFZ
 type EventFilterOptions struct {
 	Name    string   `json:"server_name,omitempty"` // filter by server name
@@ -1481,12 +1323,6 @@ type ConnzEventOptions struct {
 	EventFilterOptions
 }
 
-// In the context of system events, RoutezEventOptions are options passed to Routez
-type RoutezEventOptions struct {
-	RoutezOptions
-	EventFilterOptions
-}
-
 // In the context of system events, SubzEventOptions are options passed to Subz
 type SubszEventOptions struct {
 	SubszOptions
@@ -1496,18 +1332,6 @@ type SubszEventOptions struct {
 // In the context of system events, VarzEventOptions are options passed to Varz
 type VarzEventOptions struct {
 	VarzOptions
-	EventFilterOptions
-}
-
-// In the context of system events, GatewayzEventOptions are options passed to Gatewayz
-type GatewayzEventOptions struct {
-	GatewayzOptions
-	EventFilterOptions
-}
-
-// In the context of system events, LeafzEventOptions are options passed to Leafz
-type LeafzEventOptions struct {
-	LeafzOptions
 	EventFilterOptions
 }
 
@@ -1763,29 +1587,6 @@ func (s *Server) enableAccountTracking(a *Account) {
 	s.sendInternalMsg(subj, reply, &m.Server, &m)
 }
 
-// Event on leaf node connect.
-// Lock should NOT be held on entry.
-func (s *Server) sendLeafNodeConnect(a *Account) {
-	s.mu.Lock()
-	// If we are not in operator mode, or do not have any gateways defined, this should also be a no-op.
-	if a == nil || !s.eventsEnabled() || !s.gateway.enabled {
-		s.mu.Unlock()
-		return
-	}
-	s.sendLeafNodeConnectMsg(a.Name)
-	s.mu.Unlock()
-
-	s.switchAccountToInterestMode(a.Name)
-}
-
-// Send the leafnode connect message.
-// Lock should be held.
-func (s *Server) sendLeafNodeConnectMsg(accName string) {
-	subj := fmt.Sprintf(leafNodeConnectEventSubj, accName)
-	m := accNumConnsReq{Account: accName}
-	s.sendInternalMsg(subj, _EMPTY_, &m.Server, &m)
-}
-
 // sendAccConnsUpdate is called to send out our information on the
 // account's local connections.
 // Lock should be held on entry.
@@ -1830,12 +1631,10 @@ func (s *Server) sendAccConnsUpdate(a *Account, subj ...string) {
 // Lock shoulc be held on entry
 func (a *Account) statz() *AccountStat {
 	localConns := a.numLocalConnections()
-	leafConns := a.numLocalLeafNodes()
 	return &AccountStat{
 		Account:    a.Name,
 		Conns:      localConns,
-		LeafNodes:  leafConns,
-		TotalConns: localConns + leafConns,
+		TotalConns: localConns,
 		Received: DataStats{
 			Msgs:  atomic.LoadInt64(&a.inMsgs),
 			Bytes: atomic.LoadInt64(&a.inBytes)},
@@ -1902,7 +1701,6 @@ func (s *Server) accountConnectEvent(c *client) {
 			NameTag:    c.nameTag,
 			Kind:       c.kindString(),
 			ClientType: c.clientTypeString(),
-			MQTTClient: c.getMQTTClientID(),
 		},
 	}
 	c.mu.Unlock()
@@ -1954,7 +1752,6 @@ func (s *Server) accountDisconnectEvent(c *client, now time.Time, reason string)
 			NameTag:    c.nameTag,
 			Kind:       c.kindString(),
 			ClientType: c.clientTypeString(),
-			MQTTClient: c.getMQTTClientID(),
 		},
 		Sent: DataStats{
 			Msgs:  atomic.LoadInt64(&c.inMsgs),
@@ -2007,7 +1804,6 @@ func (s *Server) sendAuthErrorEvent(c *client) {
 			NameTag:    c.nameTag,
 			Kind:       c.kindString(),
 			ClientType: c.clientTypeString(),
-			MQTTClient: c.getMQTTClientID(),
 		},
 		Sent: DataStats{
 			Msgs:  c.inMsgs,
@@ -2143,9 +1939,7 @@ func (s *Server) remoteLatencyUpdate(sub *subscription, _ *client, _ *Account, s
 	}
 	// Now get the request id / reply. We need to see if we have a GW prefix and if so strip that off.
 	reply := rl.ReqId
-	if gwPrefix, old := isGWRoutedSubjectAndIsOldPrefix([]byte(reply)); gwPrefix {
-		reply = string(getSubjectFromGWRoutedReply([]byte(reply), old))
-	}
+
 	acc.mu.RLock()
 	si := acc.exports.responses[reply]
 	if si == nil {
@@ -2239,7 +2033,7 @@ func totalSubs(rr *SublistResult, qg []byte) (nsubs int32) {
 		if qg != nil && !bytes.Equal(qg, sub.queue) {
 			return
 		}
-		if sub.client.kind == CLIENT || sub.client.isHubLeafNode() {
+		if sub.client.kind == CLIENT {
 			nsubs++
 		}
 	}
@@ -2318,7 +2112,7 @@ func (s *Server) debugSubscribers(sub *subscription, c *client, _ *Account, subj
 				if qgroup != nil && !bytes.Equal(qgroup, sub.queue) {
 					continue
 				}
-				if sub.client.kind == CLIENT || sub.client.isHubLeafNode() {
+				if sub.client.kind == CLIENT {
 					nsubs++
 				}
 			}
@@ -2414,7 +2208,7 @@ func (s *Server) nsubsRequest(sub *subscription, c *client, _ *Account, subject,
 		subs := _subs[:0]
 		acc.sl.All(&subs)
 		for _, sub := range subs {
-			if (sub.client.kind == CLIENT || sub.client.isHubLeafNode()) && subjectIsSubsetMatch(string(sub.subject), m.Subject) {
+			if sub.client.kind == CLIENT && subjectIsSubsetMatch(string(sub.subject), m.Subject) {
 				if m.Queue != nil && !bytes.Equal(m.Queue, sub.queue) {
 					continue
 				}

@@ -16,7 +16,6 @@ package server
 import (
 	"bytes"
 	"crypto/tls"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"net/url"
@@ -49,24 +48,21 @@ func checkOptionsEqual(t *testing.T, golden, opts *Options) {
 
 func TestDefaultOptions(t *testing.T) {
 	golden := &Options{
-		Host:                DEFAULT_HOST,
-		Port:                DEFAULT_PORT,
-		MaxConn:             DEFAULT_MAX_CONNECTIONS,
-		HTTPHost:            DEFAULT_HOST,
-		PingInterval:        DEFAULT_PING_INTERVAL,
-		MaxPingsOut:         DEFAULT_PING_MAX_OUT,
-		TLSTimeout:          float64(TLS_TIMEOUT) / float64(time.Second),
-		AuthTimeout:         float64(AUTH_TIMEOUT) / float64(time.Second),
-		MaxControlLine:      MAX_CONTROL_LINE_SIZE,
-		MaxPayload:          MAX_PAYLOAD_SIZE,
-		MaxPending:          MAX_PENDING_SIZE,
-		WriteDeadline:       DEFAULT_FLUSH_DEADLINE,
-		MaxClosedClients:    DEFAULT_MAX_CLOSED_CLIENTS,
-		LameDuckDuration:    DEFAULT_LAME_DUCK_DURATION,
-		LameDuckGracePeriod: DEFAULT_LAME_DUCK_GRACE_PERIOD,
-		LeafNode: LeafNodeOpts{
-			ReconnectInterval: DEFAULT_LEAF_NODE_RECONNECT,
-		},
+		Host:                  DEFAULT_HOST,
+		Port:                  DEFAULT_PORT,
+		MaxConn:               DEFAULT_MAX_CONNECTIONS,
+		HTTPHost:              DEFAULT_HOST,
+		PingInterval:          DEFAULT_PING_INTERVAL,
+		MaxPingsOut:           DEFAULT_PING_MAX_OUT,
+		TLSTimeout:            float64(TLS_TIMEOUT) / float64(time.Second),
+		AuthTimeout:           float64(AUTH_TIMEOUT) / float64(time.Second),
+		MaxControlLine:        MAX_CONTROL_LINE_SIZE,
+		MaxPayload:            MAX_PAYLOAD_SIZE,
+		MaxPending:            MAX_PENDING_SIZE,
+		WriteDeadline:         DEFAULT_FLUSH_DEADLINE,
+		MaxClosedClients:      DEFAULT_MAX_CLOSED_CLIENTS,
+		LameDuckDuration:      DEFAULT_LAME_DUCK_DURATION,
+		LameDuckGracePeriod:   DEFAULT_LAME_DUCK_GRACE_PERIOD,
 		ConnectErrorReports:   DEFAULT_CONNECT_ERROR_REPORTS,
 		ReconnectErrorReports: DEFAULT_RECONNECT_ERROR_REPORTS,
 		MaxTracedMsgLen:       0,
@@ -251,33 +247,29 @@ func TestTLSConfigFile(t *testing.T) {
 
 func TestMergeOverrides(t *testing.T) {
 	golden := &Options{
-		ConfigFile:     "./configs/test.conf",
-		ServerName:     "testing_server",
-		Host:           "127.0.0.1",
-		Port:           2222,
-		Username:       "derek",
-		Password:       "porkchop",
-		AuthTimeout:    1.0,
-		Debug:          true,
-		Trace:          true,
-		Logtime:        false,
-		HTTPPort:       DEFAULT_HTTP_PORT,
-		HTTPBasePath:   DEFAULT_HTTP_BASE_PATH,
-		PidFile:        "/tmp/nats-server/nats-server.pid",
-		ProfPort:       6789,
-		Syslog:         true,
-		RemoteSyslog:   "udp://foo.com:33",
-		MaxControlLine: 2048,
-		MaxPayload:     65536,
-		MaxConn:        100,
-		MaxSubs:        1000,
-		MaxPending:     10000000,
-		PingInterval:   60 * time.Second,
-		MaxPingsOut:    3,
-		Cluster: ClusterOpts{
-			NoAdvertise:    true,
-			ConnectRetries: 2,
-		},
+		ConfigFile:            "./configs/test.conf",
+		ServerName:            "testing_server",
+		Host:                  "127.0.0.1",
+		Port:                  2222,
+		Username:              "derek",
+		Password:              "porkchop",
+		AuthTimeout:           1.0,
+		Debug:                 true,
+		Trace:                 true,
+		Logtime:               false,
+		HTTPPort:              DEFAULT_HTTP_PORT,
+		HTTPBasePath:          DEFAULT_HTTP_BASE_PATH,
+		PidFile:               "/tmp/nats-server/nats-server.pid",
+		ProfPort:              6789,
+		Syslog:                true,
+		RemoteSyslog:          "udp://foo.com:33",
+		MaxControlLine:        2048,
+		MaxPayload:            65536,
+		MaxConn:               100,
+		MaxSubs:               1000,
+		MaxPending:            10000000,
+		PingInterval:          60 * time.Second,
+		MaxPingsOut:           3,
 		WriteDeadline:         3 * time.Second,
 		LameDuckDuration:      4 * time.Minute,
 		ConnectErrorReports:   86400,
@@ -296,10 +288,6 @@ func TestMergeOverrides(t *testing.T) {
 		HTTPPort:     DEFAULT_HTTP_PORT,
 		HTTPBasePath: DEFAULT_HTTP_BASE_PATH,
 		ProfPort:     6789,
-		Cluster: ClusterOpts{
-			NoAdvertise:    true,
-			ConnectRetries: 2,
-		},
 	}
 	merged := MergeOptions(fopts, opts)
 
@@ -341,116 +329,6 @@ func TestAllowRouteWithDifferentPort(t *testing.T) {
 	}
 }
 
-func TestRouteFlagOverride(t *testing.T) {
-	routeFlag := "nats-route://ruser:top_secret@127.0.0.1:8246"
-	rurl, _ := url.Parse(routeFlag)
-
-	golden := &Options{
-		ConfigFile: "./configs/srv_a.conf",
-		Host:       "127.0.0.1",
-		Port:       7222,
-		Cluster: ClusterOpts{
-			Name:        "abc",
-			Host:        "127.0.0.1",
-			Port:        7244,
-			Username:    "ruser",
-			Password:    "top_secret",
-			AuthTimeout: 0.5,
-		},
-		Routes:    []*url.URL{rurl},
-		RoutesStr: routeFlag,
-	}
-
-	fopts, err := ProcessConfigFile("./configs/srv_a.conf")
-	if err != nil {
-		t.Fatalf("Received an error reading config file: %v", err)
-	}
-
-	// Overrides via flags
-	opts := &Options{
-		RoutesStr: routeFlag,
-	}
-	merged := MergeOptions(fopts, opts)
-
-	checkOptionsEqual(t, golden, merged)
-}
-
-func TestClusterFlagsOverride(t *testing.T) {
-	routeFlag := "nats-route://ruser:top_secret@127.0.0.1:7246"
-	rurl, _ := url.Parse(routeFlag)
-
-	// In this test, we override the cluster listen string. Note that in
-	// the golden options, the cluster other infos correspond to what
-	// is recovered from the configuration file, this explains the
-	// discrepency between ClusterListenStr and the rest.
-	// The server would then process the ClusterListenStr override and
-	// correctly override ClusterHost/ClustherPort/etc..
-	golden := &Options{
-		ConfigFile: "./configs/srv_a.conf",
-		Host:       "127.0.0.1",
-		Port:       7222,
-		Cluster: ClusterOpts{
-			Name:        "abc",
-			Host:        "127.0.0.1",
-			Port:        7244,
-			ListenStr:   "nats://127.0.0.1:8224",
-			Username:    "ruser",
-			Password:    "top_secret",
-			AuthTimeout: 0.5,
-		},
-		Routes: []*url.URL{rurl},
-	}
-
-	fopts, err := ProcessConfigFile("./configs/srv_a.conf")
-	if err != nil {
-		t.Fatalf("Received an error reading config file: %v", err)
-	}
-
-	// Overrides via flags
-	opts := &Options{
-		Cluster: ClusterOpts{
-			ListenStr: "nats://127.0.0.1:8224",
-		},
-	}
-	merged := MergeOptions(fopts, opts)
-
-	checkOptionsEqual(t, golden, merged)
-}
-
-func TestRouteFlagOverrideWithMultiple(t *testing.T) {
-	routeFlag := "nats-route://ruser:top_secret@127.0.0.1:8246, nats-route://ruser:top_secret@127.0.0.1:8266"
-	rurls := RoutesFromStr(routeFlag)
-
-	golden := &Options{
-		ConfigFile: "./configs/srv_a.conf",
-		Host:       "127.0.0.1",
-		Port:       7222,
-		Cluster: ClusterOpts{
-			Host:        "127.0.0.1",
-			Name:        "abc",
-			Port:        7244,
-			Username:    "ruser",
-			Password:    "top_secret",
-			AuthTimeout: 0.5,
-		},
-		Routes:    rurls,
-		RoutesStr: routeFlag,
-	}
-
-	fopts, err := ProcessConfigFile("./configs/srv_a.conf")
-	if err != nil {
-		t.Fatalf("Received an error reading config file: %v", err)
-	}
-
-	// Overrides via flags
-	opts := &Options{
-		RoutesStr: routeFlag,
-	}
-	merged := MergeOptions(fopts, opts)
-
-	checkOptionsEqual(t, golden, merged)
-}
-
 func TestDynamicPortOnListen(t *testing.T) {
 	opts, err := ProcessConfigFile("./configs/listen-1.conf")
 	if err != nil {
@@ -486,17 +364,6 @@ func TestListenConfig(t *testing.T) {
 	}
 	if opts.Port != port {
 		t.Fatalf("Received incorrect port %v, expected %v", opts.Port, port)
-	}
-
-	// Clustering
-	clusterHost := "127.0.0.1"
-	clusterPort := 4244
-
-	if opts.Cluster.Host != clusterHost {
-		t.Fatalf("Received incorrect cluster host %q, expected %q", opts.Cluster.Host, clusterHost)
-	}
-	if opts.Cluster.Port != clusterPort {
-		t.Fatalf("Received incorrect cluster port %v, expected %v", opts.Cluster.Port, clusterPort)
 	}
 
 	// HTTP
@@ -901,63 +768,7 @@ func TestTlsPinnedCertificates(t *testing.T) {
 		pinned_certs: ["7f83b1657ff1fc53b92dc18148a1d65dfc2d4b1fa3d677284addd200126d9069",
 			"a8f407340dcc719864214b85ed96f98d16cbffa8f509d9fa4ca237b7bb3f9c32"]
 	}
-	cluster {
-		port -1
-		name cluster-hub
-		tls {
-			cert_file: "./configs/certs/server.pem"
-			key_file: "./configs/certs/key.pem"
-			# Require a client certificate and map user id from certificate
-			verify: true
-			pinned_certs: ["7f83b1657ff1fc53b92dc18148a1d65dfc2d4b1fa3d677284addd200126d9069",
-				"a8f407340dcc719864214b85ed96f98d16cbffa8f509d9fa4ca237b7bb3f9c32"]
-		}
-	}
-	leafnodes {
-		port -1
-		tls {
-			cert_file: "./configs/certs/server.pem"
-			key_file: "./configs/certs/key.pem"
-			# Require a client certificate and map user id from certificate
-			verify: true
-			pinned_certs: ["7f83b1657ff1fc53b92dc18148a1d65dfc2d4b1fa3d677284addd200126d9069",
-				"a8f407340dcc719864214b85ed96f98d16cbffa8f509d9fa4ca237b7bb3f9c32"]
-		}
-	}
-	gateway {
-		name: "A"
-		port -1
-		tls {
-			cert_file: "./configs/certs/server.pem"
-			key_file: "./configs/certs/key.pem"
-			# Require a client certificate and map user id from certificate
-			verify: true
-			pinned_certs: ["7f83b1657ff1fc53b92dc18148a1d65dfc2d4b1fa3d677284addd200126d9069",
-				"a8f407340dcc719864214b85ed96f98d16cbffa8f509d9fa4ca237b7bb3f9c32"]
-		}
-	}
-	websocket {
-		port -1
-		tls {
-			cert_file: "./configs/certs/server.pem"
-			key_file: "./configs/certs/key.pem"
-			# Require a client certificate and map user id from certificate
-			verify: true
-			pinned_certs: ["7f83b1657ff1fc53b92dc18148a1d65dfc2d4b1fa3d677284addd200126d9069",
-				"a8f407340dcc719864214b85ed96f98d16cbffa8f509d9fa4ca237b7bb3f9c32"]
-		}
-	}
-	mqtt {
-		port -1
-		tls {
-			cert_file: "./configs/certs/server.pem"
-			key_file: "./configs/certs/key.pem"
-			# Require a client certificate and map user id from certificate
-			verify: true
-			pinned_certs: ["7f83b1657ff1fc53b92dc18148a1d65dfc2d4b1fa3d677284addd200126d9069",
-				"a8f407340dcc719864214b85ed96f98d16cbffa8f509d9fa4ca237b7bb3f9c32"]
-		}
-	}`))
+   `))
 	opts, err := ProcessConfigFile(confFileName)
 	if err != nil {
 		t.Fatalf("Received an error reading config file: %v", err)
@@ -970,11 +781,6 @@ func TestTlsPinnedCertificates(t *testing.T) {
 	}
 
 	check(opts.TLSPinnedCerts)
-	check(opts.LeafNode.TLSPinnedCerts)
-	check(opts.Cluster.TLSPinnedCerts)
-	check(opts.MQTT.TLSPinnedCerts)
-	check(opts.Gateway.TLSPinnedCerts)
-	check(opts.Websocket.TLSPinnedCerts)
 }
 
 func TestNkeyUsersDefaultPermissionsConfig(t *testing.T) {
@@ -1249,20 +1055,8 @@ func TestOptionsClone(t *testing.T) {
 		MaxConn:        100,
 		PingInterval:   60 * time.Second,
 		MaxPingsOut:    3,
-		Cluster: ClusterOpts{
-			NoAdvertise:    true,
-			ConnectRetries: 2,
-		},
-		Gateway: GatewayOpts{
-			Name: "A",
-			Gateways: []*RemoteGatewayOpts{
-				{Name: "B", URLs: []*url.URL{{Scheme: "nats", Host: "host:5222"}}},
-				{Name: "C"},
-			},
-		},
-		WriteDeadline: 3 * time.Second,
-		Routes:        []*url.URL{{}},
-		Users:         []*User{{Username: "foo", Password: "bar"}},
+		WriteDeadline:  3 * time.Second,
+		Users:          []*User{{Username: "foo", Password: "bar"}},
 	}
 
 	clone := opts.Clone()
@@ -1276,24 +1070,12 @@ func TestOptionsClone(t *testing.T) {
 	if reflect.DeepEqual(opts, clone) {
 		t.Fatal("Expected Options to be different")
 	}
-
-	opts.Gateway.Gateways[0].URLs[0] = nil
-	if reflect.DeepEqual(opts.Gateway.Gateways[0], clone.Gateway.Gateways[0]) {
-		t.Fatal("Expected Options to be different")
-	}
-	if clone.Gateway.Gateways[0].URLs[0].Host != "host:5222" {
-		t.Fatalf("Unexpected URL: %v", clone.Gateway.Gateways[0].URLs[0])
-	}
 }
 
 func TestOptionsCloneNilLists(t *testing.T) {
 	opts := &Options{}
 
 	clone := opts.Clone()
-
-	if clone.Routes != nil {
-		t.Fatalf("Expected Routes to be nil, got: %v", clone.Routes)
-	}
 	if clone.Users != nil {
 		t.Fatalf("Expected Users to be nil, got: %v", clone.Users)
 	}
@@ -1525,36 +1307,6 @@ func TestConfigureOptions(t *testing.T) {
 	expectedURL, _ := url.Parse("nats://127.0.0.1:6223")
 	expectToFail([]string{"-routes", expectedURL.String()}, "solicited routes")
 
-	// Ensure that we can set cluster and routes from command line
-	opts = mustNotFail([]string{"-cluster", "nats://127.0.0.1:6222", "-routes", expectedURL.String()})
-	if opts.Cluster.ListenStr != "nats://127.0.0.1:6222" {
-		t.Fatalf("Unexpected Cluster.ListenStr=%q", opts.Cluster.ListenStr)
-	}
-	if opts.RoutesStr != "nats://127.0.0.1:6223" || len(opts.Routes) != 1 || opts.Routes[0].String() != expectedURL.String() {
-		t.Fatalf("Unexpected RoutesStr: %q and Routes: %v", opts.RoutesStr, opts.Routes)
-	}
-
-	// Use a config with cluster configuration and explicit route defined.
-	// Override with empty routes string.
-	opts = mustNotFail([]string{"-c", "./configs/srv_a.conf", "-routes", ""})
-	if opts.RoutesStr != "" || len(opts.Routes) != 0 {
-		t.Fatalf("Unexpected RoutesStr: %q and Routes: %v", opts.RoutesStr, opts.Routes)
-	}
-
-	// Use a config with cluster configuration and override cluster listen string
-	expectedURL, _ = url.Parse("nats-route://ruser:top_secret@127.0.0.1:7246")
-	opts = mustNotFail([]string{"-c", "./configs/srv_a.conf", "-cluster", "nats://ivan:pwd@127.0.0.1:6222"})
-	if opts.Cluster.Username != "ivan" || opts.Cluster.Password != "pwd" || opts.Cluster.Port != 6222 ||
-		len(opts.Routes) != 1 || opts.Routes[0].String() != expectedURL.String() {
-		t.Fatalf("Unexpected Cluster and/or Routes: %#v - %v", opts.Cluster, opts.Routes)
-	}
-
-	// Disable clustering from command line
-	opts = mustNotFail([]string{"-c", "./configs/srv_a.conf", "-cluster", ""})
-	if opts.Cluster.Port != 0 {
-		t.Fatalf("Unexpected Cluster: %v", opts.Cluster)
-	}
-
 	// Various erros due to malformed cluster listen string.
 	// (adding -routes to have more than 1 set flag to check
 	// that Visit() stops when an error is found).
@@ -1594,162 +1346,6 @@ func TestConfigureOptions(t *testing.T) {
 	// Check that we use default TLS ciphers
 	if !reflect.DeepEqual(opts.TLSConfig.CipherSuites, defaultCipherSuites()) {
 		t.Fatalf("Default ciphers not set, expected %v, got %v", defaultCipherSuites(), opts.TLSConfig.CipherSuites)
-	}
-}
-
-func TestClusterPermissionsConfig(t *testing.T) {
-	template := `
-		cluster {
-			port: 1234
-			%s
-			authorization {
-				user: ivan
-				password: pwd
-				permissions {
-					import {
-						allow: "foo"
-					}
-					export {
-						allow: "bar"
-					}
-				}
-			}
-		}
-	`
-	conf := createConfFile(t, []byte(fmt.Sprintf(template, "")))
-	opts, err := ProcessConfigFile(conf)
-	if err != nil {
-		if cerr, ok := err.(*processConfigErr); ok && len(cerr.Errors()) > 0 {
-			t.Fatalf("Error processing config file: %v", err)
-		}
-	}
-	if opts.Cluster.Permissions == nil {
-		t.Fatal("Expected cluster permissions to be set")
-	}
-	if opts.Cluster.Permissions.Import == nil {
-		t.Fatal("Expected cluster import permissions to be set")
-	}
-	if len(opts.Cluster.Permissions.Import.Allow) != 1 || opts.Cluster.Permissions.Import.Allow[0] != "foo" {
-		t.Fatalf("Expected cluster import permissions to have %q, got %v", "foo", opts.Cluster.Permissions.Import.Allow)
-	}
-	if opts.Cluster.Permissions.Export == nil {
-		t.Fatal("Expected cluster export permissions to be set")
-	}
-	if len(opts.Cluster.Permissions.Export.Allow) != 1 || opts.Cluster.Permissions.Export.Allow[0] != "bar" {
-		t.Fatalf("Expected cluster export permissions to have %q, got %v", "bar", opts.Cluster.Permissions.Export.Allow)
-	}
-
-	// Now add permissions in top level cluster and check
-	// that this is the one that is being used.
-	conf = createConfFile(t, []byte(fmt.Sprintf(template, `
-		permissions {
-			import {
-				allow: "baz"
-			}
-			export {
-				allow: "bat"
-			}
-		}
-	`)))
-	opts, err = ProcessConfigFile(conf)
-	if err != nil {
-		t.Fatalf("Error processing config file: %v", err)
-	}
-	if opts.Cluster.Permissions == nil {
-		t.Fatal("Expected cluster permissions to be set")
-	}
-	if opts.Cluster.Permissions.Import == nil {
-		t.Fatal("Expected cluster import permissions to be set")
-	}
-	if len(opts.Cluster.Permissions.Import.Allow) != 1 || opts.Cluster.Permissions.Import.Allow[0] != "baz" {
-		t.Fatalf("Expected cluster import permissions to have %q, got %v", "baz", opts.Cluster.Permissions.Import.Allow)
-	}
-	if opts.Cluster.Permissions.Export == nil {
-		t.Fatal("Expected cluster export permissions to be set")
-	}
-	if len(opts.Cluster.Permissions.Export.Allow) != 1 || opts.Cluster.Permissions.Export.Allow[0] != "bat" {
-		t.Fatalf("Expected cluster export permissions to have %q, got %v", "bat", opts.Cluster.Permissions.Export.Allow)
-	}
-
-	// Tests with invalid permissions
-	invalidPerms := []string{
-		`permissions: foo`,
-		`permissions {
-			unknown_field: "foo"
-		}`,
-		`permissions {
-			import: [1, 2, 3]
-		}`,
-		`permissions {
-			import {
-				unknown_field: "foo"
-			}
-		}`,
-		`permissions {
-			import {
-				allow {
-					x: y
-				}
-			}
-		}`,
-		`permissions {
-			import {
-				deny {
-					x: y
-				}
-			}
-		}`,
-		`permissions {
-			export: [1, 2, 3]
-		}`,
-		`permissions {
-			export {
-				unknown_field: "foo"
-			}
-		}`,
-		`permissions {
-			export {
-				allow {
-					x: y
-				}
-			}
-		}`,
-		`permissions {
-			export {
-				deny {
-					x: y
-				}
-			}
-		}`,
-	}
-	for _, perms := range invalidPerms {
-		conf = createConfFile(t, []byte(fmt.Sprintf(`
-			cluster {
-				port: 1234
-				%s
-			}
-		`, perms)))
-		_, err := ProcessConfigFile(conf)
-		if err == nil {
-			t.Fatalf("Expected failure for permissions %s", perms)
-		}
-	}
-
-	for _, perms := range invalidPerms {
-		conf = createConfFile(t, []byte(fmt.Sprintf(`
-			cluster {
-				port: 1234
-				authorization {
-					user: ivan
-					password: pwd
-					%s
-				}
-			}
-		`, perms)))
-		_, err := ProcessConfigFile(conf)
-		if err == nil {
-			t.Fatalf("Expected failure for permissions %s", perms)
-		}
 	}
 }
 
@@ -2046,490 +1642,6 @@ func TestAccountUsersLoadedProperly(t *testing.T) {
 	for i := 0; i < 20; i++ {
 		check(t)
 	}
-}
-
-func TestParsingGateways(t *testing.T) {
-	content := `
-	gateway {
-		name: "A"
-		listen: "127.0.0.1:4444"
-		host: "127.0.0.1"
-		port: 4444
-		reject_unknown_cluster: true
-		authorization {
-			user: "ivan"
-			password: "pwd"
-			timeout: 2.0
-		}
-		tls {
-			cert_file: "./configs/certs/server.pem"
-			key_file: "./configs/certs/key.pem"
-			timeout: 3.0
-		}
-		advertise: "me:1"
-		connect_retries: 10
-		gateways: [
-			{
-				name: "B"
-				urls: ["nats://user1:pwd1@host2:5222", "nats://user1:pwd1@host3:6222"]
-			}
-			{
-				name: "C"
-				url: "nats://host4:7222"
-			}
-		]
-	}
-	`
-	file := "server_config_gateways.conf"
-	if err := os.WriteFile(file, []byte(content), 0600); err != nil {
-		t.Fatalf("Error writing config file: %v", err)
-	}
-	opts, err := ProcessConfigFile(file)
-	if err != nil {
-		t.Fatalf("Error processing file: %v", err)
-	}
-
-	expected := &GatewayOpts{
-		Name:           "A",
-		Host:           "127.0.0.1",
-		Port:           4444,
-		Username:       "ivan",
-		Password:       "pwd",
-		AuthTimeout:    2.0,
-		Advertise:      "me:1",
-		ConnectRetries: 10,
-		TLSTimeout:     3.0,
-		RejectUnknown:  true,
-	}
-	u1, _ := url.Parse("nats://user1:pwd1@host2:5222")
-	u2, _ := url.Parse("nats://user1:pwd1@host3:6222")
-	urls := []*url.URL{u1, u2}
-	gw := &RemoteGatewayOpts{
-		Name: "B",
-		URLs: urls,
-	}
-	expected.Gateways = append(expected.Gateways, gw)
-
-	u1, _ = url.Parse("nats://host4:7222")
-	urls = []*url.URL{u1}
-	gw = &RemoteGatewayOpts{
-		Name: "C",
-		URLs: urls,
-	}
-	expected.Gateways = append(expected.Gateways, gw)
-
-	// Just make sure that TLSConfig is set.. we have aother test
-	// to check proper generating TLSConfig from config file...
-	if opts.Gateway.TLSConfig == nil {
-		t.Fatalf("Expected TLSConfig, got none")
-	}
-	opts.Gateway.TLSConfig = nil
-	opts.Gateway.tlsConfigOpts = nil
-	if !reflect.DeepEqual(&opts.Gateway, expected) {
-		t.Fatalf("Expected %v, got %v", expected, opts.Gateway)
-	}
-}
-
-func TestParsingGatewaysErrors(t *testing.T) {
-	for _, test := range []struct {
-		name        string
-		content     string
-		expectedErr string
-	}{
-		{
-			"bad_type",
-			`gateway: "bad_type"`,
-			"Expected gateway to be a map",
-		},
-		{
-			"bad_listen",
-			`gateway {
-				name: "A"
-				port: -1
-				listen: "bad::address"
-			}`,
-			"parse address",
-		},
-		{
-			"bad_auth",
-			`gateway {
-				name: "A"
-				port: -1
-				authorization {
-					users {
-					}
-				}
-			}`,
-			"be an array",
-		},
-		{
-			"unknown_field",
-			`gateway {
-				name: "A"
-				port: -1
-				reject_unknown_cluster: true
-				unknown_field: 1
-			}`,
-			"unknown field",
-		},
-		{
-			"users_not_supported",
-			`gateway {
-				name: "A"
-				port: -1
-				authorization {
-					users [
-						{user: alice, password: foo}
-						{user: bob,   password: bar}
-					]
-				}
-			}`,
-			"does not allow multiple users",
-		},
-		{
-			"tls_error",
-			`gateway {
-				name: "A"
-				port: -1
-				tls {
-					cert_file: 123
-				}
-			}`,
-			"to be filename",
-		},
-		{
-			"tls_gen_error_cert_file_not_found",
-			`gateway {
-				name: "A"
-				port: -1
-				tls {
-					cert_file: "./configs/certs/missing.pem"
-					key_file: "./configs/certs/server-key.pem"
-				}
-			}`,
-			"certificate/key pair",
-		},
-		{
-			"tls_gen_error_key_file_not_found",
-			`gateway {
-				name: "A"
-				port: -1
-				tls {
-					cert_file: "./configs/certs/server.pem"
-					key_file: "./configs/certs/missing.pem"
-				}
-			}`,
-			"certificate/key pair",
-		},
-		{
-			"tls_gen_error_key_file_missing",
-			`gateway {
-				name: "A"
-				port: -1
-				tls {
-					cert_file: "./configs/certs/server.pem"
-				}
-			}`,
-			`missing 'key_file' in TLS configuration`,
-		},
-		{
-			"tls_gen_error_cert_file_missing",
-			`gateway {
-				name: "A"
-				port: -1
-				tls {
-					key_file: "./configs/certs/server-key.pem"
-				}
-			}`,
-			`missing 'cert_file' in TLS configuration`,
-		},
-		{
-			"tls_gen_error_key_file_not_found",
-			`gateway {
-				name: "A"
-				port: -1
-				tls {
-					cert_file: "./configs/certs/server.pem"
-					key_file: "./configs/certs/missing.pem"
-				}
-			}`,
-			"certificate/key pair",
-		},
-		{
-			"gateways_needs_to_be_an_array",
-			`gateway {
-				name: "A"
-				gateways {
-					name: "B"
-				}
-			}`,
-			"Expected gateways field to be an array",
-		},
-		{
-			"gateways_entry_needs_to_be_a_map",
-			`gateway {
-				name: "A"
-				gateways [
-					"g1", "g2"
-				]
-			}`,
-			"Expected gateway entry to be a map",
-		},
-		{
-			"bad_url",
-			`gateway {
-				name: "A"
-				gateways [
-					{
-						name: "B"
-						url: "nats://wrong url"
-					}
-				]
-			}`,
-			"error parsing gateway url",
-		},
-		{
-			"bad_urls",
-			`gateway {
-				name: "A"
-				gateways [
-					{
-						name: "B"
-						urls: ["nats://wrong url", "nats://host:5222"]
-					}
-				]
-			}`,
-			"error parsing gateway url",
-		},
-		{
-			"gateway_tls_error",
-			`gateway {
-				name: "A"
-				port: -1
-				gateways [
-					{
-						name: "B"
-						tls {
-							cert_file: 123
-						}
-					}
-				]
-			}`,
-			"to be filename",
-		},
-		{
-			"gateway_unknown_field",
-			`gateway {
-				name: "A"
-				port: -1
-				gateways [
-					{
-						name: "B"
-						unknown_field: 1
-					}
-				]
-			}`,
-			"unknown field",
-		},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			file := fmt.Sprintf("server_config_gateways_%s.conf", test.name)
-			if err := os.WriteFile(file, []byte(test.content), 0600); err != nil {
-				t.Fatalf("Error writing config file: %v", err)
-			}
-			_, err := ProcessConfigFile(file)
-			if err == nil {
-				t.Fatalf("Expected to fail, did not. Content:\n%s", test.content)
-			} else if !strings.Contains(err.Error(), test.expectedErr) {
-				t.Fatalf("Expected error containing %q, got %q, for content:\n%s", test.expectedErr, err, test.content)
-			}
-		})
-	}
-}
-
-func TestParsingLeafNodesListener(t *testing.T) {
-	content := `
-	leafnodes {
-		listen: "127.0.0.1:3333"
-		host: "127.0.0.1"
-		port: 3333
-		advertise: "me:22"
-		authorization {
-			user: "derek"
-			password: "s3cr3t!"
-			timeout: 2.2
-		}
-		tls {
-			cert_file: "./configs/certs/server.pem"
-			key_file: "./configs/certs/key.pem"
-			timeout: 3.3
-		}
-	}
-	`
-	conf := createConfFile(t, []byte(content))
-	opts, err := ProcessConfigFile(conf)
-	if err != nil {
-		t.Fatalf("Error processing file: %v", err)
-	}
-
-	expected := &LeafNodeOpts{
-		Host:        "127.0.0.1",
-		Port:        3333,
-		Username:    "derek",
-		Password:    "s3cr3t!",
-		AuthTimeout: 2.2,
-		Advertise:   "me:22",
-		TLSTimeout:  3.3,
-	}
-	if opts.LeafNode.TLSConfig == nil {
-		t.Fatalf("Expected TLSConfig, got none")
-	}
-	if opts.LeafNode.tlsConfigOpts == nil {
-		t.Fatalf("Expected TLSConfig snapshot, got none")
-	}
-	opts.LeafNode.TLSConfig = nil
-	opts.LeafNode.tlsConfigOpts = nil
-	if !reflect.DeepEqual(&opts.LeafNode, expected) {
-		t.Fatalf("Expected %v, got %v", expected, opts.LeafNode)
-	}
-}
-
-func TestParsingLeafNodeRemotes(t *testing.T) {
-	t.Run("parse config file with relative path", func(t *testing.T) {
-		content := `
-		leafnodes {
-			remotes = [
-				{
-					url: nats-leaf://127.0.0.1:2222
-					account: foobar // Local Account to bind to..
-					credentials: "./my.creds"
-				}
-			]
-		}
-		`
-		conf := createConfFile(t, []byte(content))
-		opts, err := ProcessConfigFile(conf)
-		if err != nil {
-			t.Fatalf("Error processing file: %v", err)
-		}
-		if len(opts.LeafNode.Remotes) != 1 {
-			t.Fatalf("Expected 1 remote, got %d", len(opts.LeafNode.Remotes))
-		}
-		expected := &RemoteLeafOpts{
-			LocalAccount: "foobar",
-			Credentials:  "./my.creds",
-		}
-		u, _ := url.Parse("nats-leaf://127.0.0.1:2222")
-		expected.URLs = append(expected.URLs, u)
-		if !reflect.DeepEqual(opts.LeafNode.Remotes[0], expected) {
-			t.Fatalf("Expected %v, got %v", expected, opts.LeafNode.Remotes[0])
-		}
-	})
-
-	t.Run("parse config file with tilde path", func(t *testing.T) {
-		if runtime.GOOS == "windows" {
-			t.SkipNow()
-		}
-
-		origHome := os.Getenv("HOME")
-		defer os.Setenv("HOME", origHome)
-		os.Setenv("HOME", "/home/foo")
-
-		content := `
-		leafnodes {
-			remotes = [
-				{
-					url: nats-leaf://127.0.0.1:2222
-					account: foobar // Local Account to bind to..
-					credentials: "~/my.creds"
-				}
-			]
-		}
-		`
-		conf := createConfFile(t, []byte(content))
-		opts, err := ProcessConfigFile(conf)
-		if err != nil {
-			t.Fatalf("Error processing file: %v", err)
-		}
-		expected := &RemoteLeafOpts{
-			LocalAccount: "foobar",
-			Credentials:  "/home/foo/my.creds",
-		}
-		u, _ := url.Parse("nats-leaf://127.0.0.1:2222")
-		expected.URLs = append(expected.URLs, u)
-		if !reflect.DeepEqual(opts.LeafNode.Remotes[0], expected) {
-			t.Fatalf("Expected %v, got %v", expected, opts.LeafNode.Remotes[0])
-		}
-	})
-
-	t.Run("url ordering", func(t *testing.T) {
-		// 16! possible permutations.
-		orderedURLs := make([]string, 0, 16)
-		for i := 0; i < cap(orderedURLs); i++ {
-			orderedURLs = append(orderedURLs, fmt.Sprintf("nats-leaf://host%d:7422", i))
-		}
-		confURLs, err := json.Marshal(orderedURLs)
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		content := `
-		port: -1
-		leafnodes {
-			remotes = [
-				{
-					dont_randomize: true
-					urls: %[1]s
-				}
-				{
-					urls: %[1]s
-				}
-			]
-		}
-		`
-		conf := createConfFile(t, []byte(fmt.Sprintf(content, confURLs)))
-
-		s, _ := RunServerWithConfig(conf)
-		defer s.Shutdown()
-
-		s.mu.Lock()
-		r1 := s.leafRemoteCfgs[0]
-		r2 := s.leafRemoteCfgs[1]
-		s.mu.Unlock()
-
-		r1.RLock()
-		gotOrdered := r1.urls
-		r1.RUnlock()
-		if got, want := len(gotOrdered), len(orderedURLs); got != want {
-			t.Fatalf("Unexpected rem0 len URLs, got %d, want %d", got, want)
-		}
-
-		// These should be IN order.
-		for i := range orderedURLs {
-			if got, want := gotOrdered[i].String(), orderedURLs[i]; got != want {
-				t.Fatalf("Unexpected ordered url, got %s, want %s", got, want)
-			}
-		}
-
-		r2.RLock()
-		gotRandom := r2.urls
-		r2.RUnlock()
-		if got, want := len(gotRandom), len(orderedURLs); got != want {
-			t.Fatalf("Unexpected rem1 len URLs, got %d, want %d", got, want)
-		}
-
-		// These should be OUT of order.
-		var random bool
-		for i := range orderedURLs {
-			if gotRandom[i].String() != orderedURLs[i] {
-				random = true
-				break
-			}
-		}
-		if !random {
-			t.Fatal("Expected urls to be random")
-		}
-	})
 }
 
 func TestLargeMaxControlLine(t *testing.T) {

@@ -434,68 +434,9 @@ func (srv *Server) NewOCSPMonitor(config *tlsConfigKind) (*tls.Config, *OCSPMoni
 		}
 
 		// Check whether need to verify staples from a peer router or gateway connection.
-		switch kind {
-		case kindStringMap[ROUTER], kindStringMap[GATEWAY]:
-			tc.VerifyConnection = func(s tls.ConnectionState) error {
-				oresp := s.OCSPResponse
-				if oresp == nil {
-					return fmt.Errorf("%s peer missing OCSP Staple", kind)
-				}
-
-				// Peer connections will verify the response of the staple.
-				if len(s.VerifiedChains) == 0 {
-					return fmt.Errorf("%s peer missing TLS verified chains", kind)
-				}
-
-				chain := s.VerifiedChains[0]
-				leaf := chain[0]
-				parent := issuers[len(issuers)-1]
-
-				resp, err := ocsp.ParseResponseForCert(oresp, leaf, parent)
-				if err != nil {
-					return fmt.Errorf("failed to parse OCSP response from %s peer: %w", kind, err)
-				}
-				if resp.Certificate == nil {
-					if err := resp.CheckSignatureFrom(parent); err != nil {
-						return fmt.Errorf("OCSP staple not issued by issuer: %w", err)
-					}
-				} else {
-					if err := resp.Certificate.CheckSignatureFrom(parent); err != nil {
-						return fmt.Errorf("OCSP staple's signer not signed by issuer: %w", err)
-					}
-					ok := false
-					for _, eku := range resp.Certificate.ExtKeyUsage {
-						if eku == x509.ExtKeyUsageOCSPSigning {
-							ok = true
-							break
-						}
-					}
-					if !ok {
-						return fmt.Errorf("OCSP staple's signer missing authorization by CA to act as OCSP signer")
-					}
-				}
-				if resp.Status != ocsp.Good {
-					return fmt.Errorf("bad status for OCSP Staple from %s peer: %s", kind, ocspStatusString(resp.Status))
-				}
-
-				return nil
-			}
-
-			// When server makes a peer connection, need to also present an OCSP Staple.
-			tc.GetClientCertificate = func(info *tls.CertificateRequestInfo) (*tls.Certificate, error) {
-				raw, _, err := mon.getStatus()
-				if err != nil {
-					return nil, err
-				}
-				cert.OCSPStaple = raw
-
-				return &cert, nil
-			}
-		default:
-			// GetClientCertificate returns a certificate that's presented to a server.
-			tc.GetClientCertificate = func(info *tls.CertificateRequestInfo) (*tls.Certificate, error) {
-				return &cert, nil
-			}
+		// GetClientCertificate returns a certificate that's presented to a server.
+		tc.GetClientCertificate = func(info *tls.CertificateRequestInfo) (*tls.Certificate, error) {
+			return &cert, nil
 		}
 
 	}
@@ -540,77 +481,6 @@ func (s *Server) configureOCSP() []*tlsConfigKind {
 			apply:     func(tc *tls.Config) { sopts.TLSConfig = tc },
 		}
 		configs = append(configs, o)
-	}
-	if config := sopts.Cluster.TLSConfig; config != nil {
-		opts := sopts.Cluster.tlsConfigOpts
-		o := &tlsConfigKind{
-			kind:      kindStringMap[ROUTER],
-			tlsConfig: config,
-			tlsOpts:   opts,
-			apply:     func(tc *tls.Config) { sopts.Cluster.TLSConfig = tc },
-		}
-		configs = append(configs, o)
-	}
-	if config := sopts.LeafNode.TLSConfig; config != nil {
-		opts := sopts.LeafNode.tlsConfigOpts
-		o := &tlsConfigKind{
-			kind:      kindStringMap[LEAF],
-			tlsConfig: config,
-			tlsOpts:   opts,
-			apply: func(tc *tls.Config) {
-				// RequireAndVerifyClientCert is used to tell a client that it
-				// should send the client cert to the server.
-				if opts.Verify {
-					tc.ClientAuth = tls.RequireAndVerifyClientCert
-				}
-				// We're a leaf hub server, so we must not set this.
-				tc.GetClientCertificate = nil
-				sopts.LeafNode.TLSConfig = tc
-			},
-		}
-		configs = append(configs, o)
-	}
-	for _, remote := range sopts.LeafNode.Remotes {
-		if config := remote.TLSConfig; config != nil {
-			// Use a copy of the remote here since will be used
-			// in the apply func callback below.
-			r, opts := remote, remote.tlsConfigOpts
-			o := &tlsConfigKind{
-				kind:      kindStringMap[LEAF],
-				tlsConfig: config,
-				tlsOpts:   opts,
-				apply: func(tc *tls.Config) {
-					// We're a leaf client, so we must not set this.
-					tc.GetCertificate = nil
-					r.TLSConfig = tc
-				},
-			}
-			configs = append(configs, o)
-		}
-	}
-	if config := sopts.Gateway.TLSConfig; config != nil {
-		opts := sopts.Gateway.tlsConfigOpts
-		o := &tlsConfigKind{
-			kind:      kindStringMap[GATEWAY],
-			tlsConfig: config,
-			tlsOpts:   opts,
-			apply:     func(tc *tls.Config) { sopts.Gateway.TLSConfig = tc },
-		}
-		configs = append(configs, o)
-	}
-	for _, remote := range sopts.Gateway.Gateways {
-		if config := remote.TLSConfig; config != nil {
-			gw, opts := remote, remote.tlsConfigOpts
-			o := &tlsConfigKind{
-				kind:      kindStringMap[GATEWAY],
-				tlsConfig: config,
-				tlsOpts:   opts,
-				apply: func(tc *tls.Config) {
-					gw.TLSConfig = tc
-				},
-			}
-			configs = append(configs, o)
-		}
 	}
 	return configs
 }

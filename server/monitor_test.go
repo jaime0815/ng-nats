@@ -1270,31 +1270,6 @@ func TestConnzSortBadRequest(t *testing.T) {
 	}
 }
 
-func pollRoutez(t *testing.T, s *Server, mode int, url string, opts *RoutezOptions) *Routez {
-	t.Helper()
-	if mode == 0 {
-		rz := &Routez{}
-		body := readBody(t, url)
-		if err := json.Unmarshal(body, rz); err != nil {
-			t.Fatalf("Got an error unmarshalling the body: %v\n", err)
-		}
-		return rz
-	}
-	rz, err := s.Routez(opts)
-	if err != nil {
-		t.Fatalf("Error on Routez: %v", err)
-	}
-	return rz
-}
-
-func TestRoutezWithBadParams(t *testing.T) {
-	s := runMonitorServer()
-	defer s.Shutdown()
-
-	url := fmt.Sprintf("http://127.0.0.1:%d/routez?", s.MonitorAddr().Port)
-	readBodyEx(t, url+"subs=xxx", http.StatusBadRequest, textPlain)
-}
-
 func pollSubsz(t *testing.T, s *Server, mode int, url string, opts *SubszOptions) *Subsz {
 	t.Helper()
 	if mode == 0 {
@@ -1933,46 +1908,6 @@ func TestMonitorHandler(t *testing.T) {
 	}
 }
 
-func TestMonitorRoutezRace(t *testing.T) {
-	resetPreviousHTTPConnections()
-	srvAOpts := DefaultMonitorOptions()
-	srvAOpts.NoSystemAccount = true
-	srvAOpts.Cluster.Name = "B"
-	srvAOpts.Cluster.Port = -1
-	srvA := RunServer(srvAOpts)
-	defer srvA.Shutdown()
-
-	srvBOpts := nextServerOpts(srvAOpts)
-	srvBOpts.Routes = RoutesFromStr(fmt.Sprintf("nats://127.0.0.1:%d", srvA.ClusterAddr().Port))
-
-	doneCh := make(chan struct{})
-	go func() {
-		defer func() {
-			doneCh <- struct{}{}
-		}()
-		for i := 0; i < 10; i++ {
-			time.Sleep(10 * time.Millisecond)
-			// Reset ports
-			srvBOpts.Port = -1
-			srvBOpts.Cluster.Port = -1
-			srvB := RunServer(srvBOpts)
-			time.Sleep(20 * time.Millisecond)
-			srvB.Shutdown()
-		}
-	}()
-	done := false
-	for !done {
-		if _, err := srvA.Routez(nil); err != nil {
-			time.Sleep(10 * time.Millisecond)
-		}
-		select {
-		case <-doneCh:
-			done = true
-		default:
-		}
-	}
-}
-
 func TestConnzTLSInHandshake(t *testing.T) {
 	resetPreviousHTTPConnections()
 
@@ -2035,16 +1970,7 @@ func TestConnzTLSCfg(t *testing.T) {
 	opts.TLSConfig, err = GenTLSConfig(tc)
 	require_NoError(t, err)
 	opts.TLSConfig.ClientAuth = tls.RequireAndVerifyClientCert
-	opts.Gateway.TLSConfig, err = GenTLSConfig(tc)
 	require_NoError(t, err)
-	opts.Gateway.TLSTimeout = 1.5
-	opts.LeafNode.TLSConfig, err = GenTLSConfig(tc)
-	require_NoError(t, err)
-	opts.LeafNode.TLSConfig.ClientAuth = tls.RequireAndVerifyClientCert
-	opts.LeafNode.TLSTimeout = 1.5
-	opts.Cluster.TLSConfig, err = GenTLSConfig(tc)
-	require_NoError(t, err)
-	opts.Cluster.TLSTimeout = 1.5
 
 	s := RunServer(opts)
 	defer s.Shutdown()
@@ -2071,9 +1997,6 @@ func TestConnzTLSCfg(t *testing.T) {
 			t.Fatalf("Looks like varz blocked on handshake, took %v", duration)
 		}
 		check(varz.TLSVerify, varz.TLSRequired, varz.TLSTimeout)
-		check(varz.Cluster.TLSVerify, varz.Cluster.TLSRequired, varz.Cluster.TLSTimeout)
-		check(varz.Gateway.TLSVerify, varz.Gateway.TLSRequired, varz.Gateway.TLSTimeout)
-		check(varz.LeafNode.TLSVerify, varz.LeafNode.TLSRequired, varz.LeafNode.TLSTimeout)
 	}
 }
 
@@ -2148,13 +2071,6 @@ func TestServerIDs(t *testing.T) {
 		if c.ID == "" {
 			t.Fatal("Connz ID is empty")
 		}
-		r := pollRoutez(t, s, mode, murl+"routez", nil)
-		if r.ID == "" {
-			t.Fatal("Routez ID is empty")
-		}
-		if v.ID != c.ID || v.ID != r.ID {
-			t.Fatalf("Varz ID [%s] is not equal to Connz ID [%s] or Routez ID [%s]", v.ID, c.ID, r.ID)
-		}
 	}
 }
 
@@ -2165,7 +2081,6 @@ func TestHttpStatsNoUpdatedWhenUsingServerFuncs(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		s.Varz(nil)
 		s.Connz(nil)
-		s.Routez(nil)
 		s.Subsz(nil)
 	}
 
@@ -2360,58 +2275,6 @@ func testMonitorStructPresent(t *testing.T, tag string) {
 	body := readBody(t, varzURL)
 	if !bytes.Contains(body, []byte(`"`+tag+`": {}`)) {
 		t.Fatalf("%s should be present and empty, got %s", tag, body)
-	}
-}
-
-func TestMonitorCluster(t *testing.T) {
-	testMonitorStructPresent(t, "cluster")
-
-	resetPreviousHTTPConnections()
-	opts := DefaultMonitorOptions()
-	opts.NoSystemAccount = true
-	opts.Cluster.Name = "A"
-	opts.Cluster.Port = -1
-	opts.Cluster.AuthTimeout = 1
-	opts.Routes = RoutesFromStr("nats://127.0.0.1:1234")
-	s := RunServer(opts)
-	defer s.Shutdown()
-
-	expected := ClusterOptsVarz{
-		"A",
-		opts.Cluster.Host,
-		opts.Cluster.Port,
-		opts.Cluster.AuthTimeout,
-		[]string{"127.0.0.1:1234"},
-		opts.Cluster.TLSTimeout,
-		opts.Cluster.TLSConfig != nil,
-		opts.Cluster.TLSConfig != nil,
-	}
-
-	varzURL := fmt.Sprintf("http://127.0.0.1:%d/varz", s.MonitorAddr().Port)
-	for mode := 0; mode < 2; mode++ {
-		check := func(t *testing.T, v *Varz) {
-			t.Helper()
-			if !reflect.DeepEqual(v.Cluster, expected) {
-				t.Fatalf("mode=%v - expected %+v, got %+v", mode, expected, v.Cluster)
-			}
-		}
-		v := pollVarz(t, s, mode, varzURL, nil)
-		check(t, v)
-
-		// Having this here to make sure that if fields are added in ClusterOptsVarz,
-		// we make sure to update this test (compiler will report an error if we don't)
-		_ = ClusterOptsVarz{"", "", 0, 0, nil, 2, false, false}
-
-		// Alter the fields to make sure that we have a proper deep copy
-		// of what may be stored in the server. Anything we change here
-		// should not affect the next returned value.
-		v.Cluster.Name = "wrong"
-		v.Cluster.Host = "wrong"
-		v.Cluster.Port = 0
-		v.Cluster.AuthTimeout = 0
-		v.Cluster.URLs = []string{"wrong"}
-		v = pollVarz(t, s, mode, varzURL, nil)
-		check(t, v)
 	}
 }
 
@@ -2659,105 +2522,6 @@ func TestMonitorReloadTLSConfig(t *testing.T) {
 		t.Fatalf("Error: %v", err)
 	}
 }
-
-func TestMonitorMQTT(t *testing.T) {
-	o := DefaultOptions()
-	o.HTTPHost = "127.0.0.1"
-	o.HTTPPort = -1
-	o.ServerName = "mqtt_server"
-	o.Users = []*User{{Username: "someuser"}}
-	pinnedCerts := make(PinnedCertSet)
-	pinnedCerts["7f83b1657ff1fc53b92dc18148a1d65dfc2d4b1fa3d677284addd200126d9069"] = struct{}{}
-	o.MQTT = MQTTOpts{
-		Host:           "127.0.0.1",
-		Port:           -1,
-		NoAuthUser:     "someuser",
-		JsDomain:       "js",
-		AuthTimeout:    2.0,
-		TLSMap:         true,
-		TLSTimeout:     3.0,
-		TLSPinnedCerts: pinnedCerts,
-		AckWait:        4 * time.Second,
-		MaxAckPending:  256,
-	}
-	s := RunServer(o)
-	defer s.Shutdown()
-
-	expected := &MQTTOptsVarz{
-		Host:           "127.0.0.1",
-		Port:           o.MQTT.Port,
-		NoAuthUser:     "someuser",
-		JsDomain:       "js",
-		AuthTimeout:    2.0,
-		TLSMap:         true,
-		TLSTimeout:     3.0,
-		TLSPinnedCerts: []string{"7f83b1657ff1fc53b92dc18148a1d65dfc2d4b1fa3d677284addd200126d9069"},
-		AckWait:        4 * time.Second,
-		MaxAckPending:  256,
-	}
-	url := fmt.Sprintf("http://127.0.0.1:%d/varz", s.MonitorAddr().Port)
-	for mode := 0; mode < 2; mode++ {
-		v := pollVarz(t, s, mode, url, nil)
-		vm := &v.MQTT
-		if !reflect.DeepEqual(vm, expected) {
-			t.Fatalf("Expected\n%+v\nGot:\n%+v", expected, vm)
-		}
-	}
-}
-
-func TestMonitorWebsocket(t *testing.T) {
-	o := DefaultOptions()
-	o.HTTPHost = "127.0.0.1"
-	o.HTTPPort = -1
-	kp, _ := nkeys.FromSeed(oSeed)
-	pub, _ := kp.PublicKey()
-	o.TrustedKeys = []string{pub}
-	o.Users = []*User{{Username: "someuser"}}
-	pinnedCerts := make(PinnedCertSet)
-	pinnedCerts["7f83b1657ff1fc53b92dc18148a1d65dfc2d4b1fa3d677284addd200126d9069"] = struct{}{}
-	o.Websocket = WebsocketOpts{
-		Host:             "127.0.0.1",
-		Port:             -1,
-		Advertise:        "somehost:8080",
-		NoAuthUser:       "someuser",
-		JWTCookie:        "somecookiename",
-		AuthTimeout:      2.0,
-		NoTLS:            true,
-		TLSMap:           true,
-		TLSPinnedCerts:   pinnedCerts,
-		SameOrigin:       true,
-		AllowedOrigins:   []string{"origin1", "origin2"},
-		Compression:      true,
-		HandshakeTimeout: 4 * time.Second,
-	}
-	s := RunServer(o)
-	defer s.Shutdown()
-
-	expected := &WebsocketOptsVarz{
-		Host:             "127.0.0.1",
-		Port:             o.Websocket.Port,
-		Advertise:        "somehost:8080",
-		NoAuthUser:       "someuser",
-		JWTCookie:        "somecookiename",
-		AuthTimeout:      2.0,
-		NoTLS:            true,
-		TLSMap:           true,
-		TLSPinnedCerts:   []string{"7f83b1657ff1fc53b92dc18148a1d65dfc2d4b1fa3d677284addd200126d9069"},
-		SameOrigin:       true,
-		AllowedOrigins:   []string{"origin1", "origin2"},
-		Compression:      true,
-		HandshakeTimeout: 4 * time.Second,
-	}
-	url := fmt.Sprintf("http://127.0.0.1:%d/varz", s.MonitorAddr().Port)
-	for mode := 0; mode < 2; mode++ {
-		v := pollVarz(t, s, mode, url, nil)
-		vw := &v.Websocket
-		if !reflect.DeepEqual(vw, expected) {
-			t.Fatalf("Expected\n%+v\nGot:\n%+v", expected, vw)
-		}
-	}
-}
-
 func TestMonitorConnzOperatorModeFilterByUser(t *testing.T) {
 	accKp, accPub := createKey(t)
 	accClaim := jwt.NewAccountClaims(accPub)

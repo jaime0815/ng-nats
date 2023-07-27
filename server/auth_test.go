@@ -111,6 +111,17 @@ func TestUserCloneNil(t *testing.T) {
 	}
 }
 
+func testCreateAllowedConnectionTypes(list []string) map[string]struct{} {
+	if len(list) == 0 {
+		return nil
+	}
+	m := make(map[string]struct{}, len(list))
+	for _, l := range list {
+		m[l] = struct{}{}
+	}
+	return m
+}
+
 func TestUserUnknownAllowedConnectionType(t *testing.T) {
 	o := DefaultOptions()
 	o.Users = []*User{{

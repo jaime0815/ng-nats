@@ -29,9 +29,10 @@ import (
 	"time"
 
 	"github.com/nats-io/jwt/v2"
-	"github.com/nats-io/nats-server/v2/internal/ldap"
 	"github.com/nats-io/nkeys"
 	"golang.org/x/crypto/bcrypt"
+
+	"github.com/nats-io/nats-server/v2/internal/ldap"
 )
 
 // Authentication is an interface for implementing authentication
@@ -261,11 +262,6 @@ func (s *Server) configureAuthorization() {
 		s.nkeys = nil
 		s.info.AuthRequired = false
 	}
-
-	// Do similar for websocket config
-	s.wsConfigAuth(&opts.Websocket)
-	// And for mqtt config
-	s.mqttConfigAuth(&opts.MQTT)
 }
 
 // Takes the given slices of NkeyUser and User options and build
@@ -318,12 +314,6 @@ func (s *Server) checkAuthentication(c *client) bool {
 	switch c.kind {
 	case CLIENT:
 		return s.isClientAuthorized(c)
-	case ROUTER:
-		return s.isRouterAuthorized(c)
-	case GATEWAY:
-		return s.isGatewayAuthorized(c)
-	case LEAF:
-		return s.isLeafNodeAuthorized(c)
 	default:
 		return false
 	}
@@ -345,7 +335,7 @@ func (s *Server) isClientAuthorized(c *client) bool {
 		return false
 	}
 
-	if c.kind == CLIENT || c.kind == LEAF {
+	if c.kind == CLIENT {
 		// Generate an event if we have a system account.
 		s.accountConnectEvent(c)
 	}
@@ -552,16 +542,6 @@ func (s *Server) processClientOrLeafAuthentication(c *client, opts *Options) boo
 	s.mu.Lock()
 	authRequired := s.info.AuthRequired
 	if !authRequired {
-		// If no auth required for regular clients, then check if
-		// we have an override for MQTT or Websocket clients.
-		switch c.clientType() {
-		case MQTT:
-			authRequired = s.mqtt.authOverride
-		case WS:
-			authRequired = s.websocket.authOverride
-		}
-	}
-	if !authRequired {
 		// TODO(dlc) - If they send us credentials should we fail?
 		s.mu.Unlock()
 		return true
@@ -574,46 +554,9 @@ func (s *Server) processClientOrLeafAuthentication(c *client, opts *Options) boo
 		pinnedAcounts map[string]struct{}
 	)
 	tlsMap := opts.TLSMap
-	if c.kind == CLIENT {
-		switch c.clientType() {
-		case MQTT:
-			mo := &opts.MQTT
-			// Always override TLSMap.
-			tlsMap = mo.TLSMap
-			// The rest depends on if there was any auth override in
-			// the mqtt's config.
-			if s.mqtt.authOverride {
-				noAuthUser = mo.NoAuthUser
-				username = mo.Username
-				password = mo.Password
-				token = mo.Token
-				ao = true
-			}
-		case WS:
-			wo := &opts.Websocket
-			// Always override TLSMap.
-			tlsMap = wo.TLSMap
-			// The rest depends on if there was any auth override in
-			// the websocket's config.
-			if s.websocket.authOverride {
-				noAuthUser = wo.NoAuthUser
-				username = wo.Username
-				password = wo.Password
-				token = wo.Token
-				ao = true
-			}
-		}
-	} else {
-		tlsMap = opts.LeafNode.TLSMap
-	}
 
 	if !ao {
 		noAuthUser = opts.NoAuthUser
-		// If a leaf connects using websocket, and websocket{} block has a no_auth_user
-		// use that one instead.
-		if c.kind == LEAF && c.isWebsocket() && opts.Websocket.NoAuthUser != _EMPTY_ {
-			noAuthUser = opts.Websocket.NoAuthUser
-		}
 		username = opts.Username
 		password = opts.Password
 		token = opts.Authorization
@@ -714,7 +657,7 @@ func (s *Server) processClientOrLeafAuthentication(c *client, opts *Options) boo
 			// but we set it here to be able to identify it in the logs.
 			c.opts.Username = user.Username
 		} else {
-			if (c.kind == CLIENT || c.kind == LEAF) && noAuthUser != _EMPTY_ &&
+			if c.kind == CLIENT && noAuthUser != _EMPTY_ &&
 				c.opts.Username == _EMPTY_ && c.opts.Password == _EMPTY_ && c.opts.Token == _EMPTY_ {
 				if u, exists := s.users[noAuthUser]; exists {
 					c.mu.Lock()
@@ -938,12 +881,6 @@ func (s *Server) processClientOrLeafAuthentication(c *client, opts *Options) boo
 			}
 			return comparePasswords(password, c.opts.Password)
 		}
-	} else if c.kind == LEAF {
-		// There is no required username/password to connect and
-		// there was no u/p in the CONNECT or none that matches the
-		// know users. Register the leaf connection with global account
-		// or the one specified in config (if provided).
-		return s.registerLeafWithAccount(c, opts.LeafNode.Account)
 	}
 	return false
 }
@@ -1098,83 +1035,6 @@ URLS:
 	return false
 }
 
-// checkRouterAuth checks optional router authorization which can be nil or username/password.
-func (s *Server) isRouterAuthorized(c *client) bool {
-	// Snapshot server options.
-	opts := s.getOpts()
-
-	// Check custom auth first, then TLS map if enabled
-	// then single user/pass.
-	if s.opts.CustomRouterAuthentication != nil {
-		return s.opts.CustomRouterAuthentication.Check(c)
-	}
-
-	if opts.Cluster.TLSMap || opts.Cluster.TLSCheckKnownURLs {
-		return checkClientTLSCertSubject(c, func(user string, _ *ldap.DN, isDNSAltName bool) (string, bool) {
-			if user == "" {
-				return "", false
-			}
-			if opts.Cluster.TLSCheckKnownURLs && isDNSAltName {
-				if dnsAltNameMatches(dnsAltNameLabels(user), opts.Routes) {
-					return "", true
-				}
-			}
-			if opts.Cluster.TLSMap && opts.Cluster.Username == user {
-				return "", true
-			}
-			return "", false
-		})
-	}
-
-	if opts.Cluster.Username == "" {
-		return true
-	}
-
-	if opts.Cluster.Username != c.opts.Username {
-		return false
-	}
-	if !comparePasswords(opts.Cluster.Password, c.opts.Password) {
-		return false
-	}
-	return true
-}
-
-// isGatewayAuthorized checks optional gateway authorization which can be nil or username/password.
-func (s *Server) isGatewayAuthorized(c *client) bool {
-	// Snapshot server options.
-	opts := s.getOpts()
-
-	// Check whether TLS map is enabled, otherwise use single user/pass.
-	if opts.Gateway.TLSMap || opts.Gateway.TLSCheckKnownURLs {
-		return checkClientTLSCertSubject(c, func(user string, _ *ldap.DN, isDNSAltName bool) (string, bool) {
-			if user == "" {
-				return "", false
-			}
-			if opts.Gateway.TLSCheckKnownURLs && isDNSAltName {
-				labels := dnsAltNameLabels(user)
-				for _, gw := range opts.Gateway.Gateways {
-					if gw != nil && dnsAltNameMatches(labels, gw.URLs) {
-						return "", true
-					}
-				}
-			}
-			if opts.Gateway.TLSMap && opts.Gateway.Username == user {
-				return "", true
-			}
-			return "", false
-		})
-	}
-
-	if opts.Gateway.Username == "" {
-		return true
-	}
-
-	if opts.Gateway.Username != c.opts.Username {
-		return false
-	}
-	return comparePasswords(opts.Gateway.Password, c.opts.Password)
-}
-
 func (s *Server) registerLeafWithAccount(c *client, account string) bool {
 	var err error
 	acc := s.globalAccount()
@@ -1190,76 +1050,6 @@ func (s *Server) registerLeafWithAccount(c *client, account string) bool {
 		return false
 	}
 	return true
-}
-
-// isLeafNodeAuthorized will check for auth for an inbound leaf node connection.
-func (s *Server) isLeafNodeAuthorized(c *client) bool {
-	opts := s.getOpts()
-
-	isAuthorized := func(username, password, account string) bool {
-		if username != c.opts.Username {
-			return false
-		}
-		if !comparePasswords(password, c.opts.Password) {
-			return false
-		}
-		return s.registerLeafWithAccount(c, account)
-	}
-
-	// If leafnodes config has an authorization{} stanza, this takes precedence.
-	// The user in CONNECT must match. We will bind to the account associated
-	// with that user (from the leafnode's authorization{} config).
-	if opts.LeafNode.Username != _EMPTY_ {
-		return isAuthorized(opts.LeafNode.Username, opts.LeafNode.Password, opts.LeafNode.Account)
-	} else if len(opts.LeafNode.Users) > 0 {
-		if opts.LeafNode.TLSMap {
-			var user *User
-			found := checkClientTLSCertSubject(c, func(u string, _ *ldap.DN, _ bool) (string, bool) {
-				// This is expected to be a very small array.
-				for _, usr := range opts.LeafNode.Users {
-					if u == usr.Username {
-						user = usr
-						return u, true
-					}
-				}
-				return _EMPTY_, false
-			})
-			if !found {
-				return false
-			}
-			if c.opts.Username != _EMPTY_ {
-				s.Warnf("User %q found in connect proto, but user required from cert", c.opts.Username)
-			}
-			c.opts.Username = user.Username
-			// EMPTY will result in $G
-			accName := _EMPTY_
-			if user.Account != nil {
-				accName = user.Account.GetName()
-			}
-			// This will authorize since are using an existing user,
-			// but it will also register with proper account.
-			return isAuthorized(user.Username, user.Password, accName)
-		}
-
-		// This is expected to be a very small array.
-		for _, u := range opts.LeafNode.Users {
-			if u.Username == c.opts.Username {
-				var accName string
-				if u.Account != nil {
-					accName = u.Account.Name
-				}
-				return isAuthorized(u.Username, u.Password, accName)
-			}
-		}
-		return false
-	}
-
-	// We are here if we accept leafnode connections without any credentials.
-
-	// Still, if the CONNECT has some user info, we will bind to the
-	// user's account or to the specified default account (if provided)
-	// or to the global account.
-	return s.isClientAuthorized(c)
 }
 
 // Support for bcrypt stored passwords and tokens.

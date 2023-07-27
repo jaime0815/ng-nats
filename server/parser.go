@@ -132,11 +132,6 @@ const (
 )
 
 func (c *client) parse(buf []byte) error {
-	// Branch out to mqtt clients. c.mqtt is immutable, but should it become
-	// an issue (say data race detection), we could branch outside in readLoop
-	if c.isMqtt() {
-		return c.mqttParse(buf)
-	}
 	var i int
 	var b byte
 	var lmsg bool
@@ -182,13 +177,6 @@ func (c *client) parse(buf []byte) error {
 						goto authErr
 					}
 				}
-				// If the connection is a gateway connection, make sure that
-				// if this is an inbound, it starts with a CONNECT.
-				if c.kind == GATEWAY && !c.gw.outbound && !c.gw.connected {
-					// Use auth violation since no CONNECT was sent.
-					// It could be a parseErr too.
-					goto authErr
-				}
 			}
 			switch b {
 			case 'P', 'p':
@@ -204,12 +192,6 @@ func (c *client) parse(buf []byte) error {
 					goto parseErr
 				} else {
 					c.state = OP_R
-				}
-			case 'L', 'l':
-				if c.kind != LEAF && c.kind != ROUTER {
-					goto parseErr
-				} else {
-					c.state = OP_L
 				}
 			case 'A', 'a':
 				if c.kind == CLIENT {
@@ -347,17 +329,6 @@ func (c *client) parse(buf []byte) error {
 					return err
 				}
 				var err error
-				if c.kind == ROUTER || c.kind == GATEWAY {
-					if trace {
-						c.traceInOp("HMSG", arg)
-					}
-					err = c.processRoutedHeaderMsgArgs(arg)
-				} else if c.kind == LEAF {
-					if trace {
-						c.traceInOp("HMSG", arg)
-					}
-					err = c.processLeafHeaderMsgArgs(arg)
-				}
 				if err != nil {
 					return err
 				}
@@ -484,7 +455,7 @@ func (c *client) parse(buf []byte) error {
 			}
 
 			// Check for mappings.
-			if (c.kind == CLIENT || c.kind == LEAF) && c.in.flags.isSet(hasMappings) {
+			if c.kind == CLIENT && c.in.flags.isSet(hasMappings) {
 				changed := c.selectMappedSubject()
 				if trace && changed {
 					c.traceInOp("MAPPING", []byte(fmt.Sprintf("%s -> %s", c.pa.mapped, c.pa.subject)))
@@ -543,9 +514,6 @@ func (c *client) parse(buf []byte) error {
 				if trace {
 					c.traceInOp("A+", arg)
 				}
-				if err := c.processAccountSub(arg); err != nil {
-					return err
-				}
 				c.drop, c.as, c.state = 0, i+1, OP_START
 			default:
 				if c.argBuf != nil {
@@ -585,7 +553,6 @@ func (c *client) parse(buf []byte) error {
 				if trace {
 					c.traceInOp("A-", arg)
 				}
-				c.processAccountUnsub(arg)
 				c.drop, c.as, c.state = 0, i+1, OP_START
 			default:
 				if c.argBuf != nil {
@@ -644,29 +611,6 @@ func (c *client) parse(buf []byte) error {
 						c.traceInOp("SUB", arg)
 					}
 					err = c.parseSub(arg, false)
-				case ROUTER:
-					switch c.op {
-					case 'R', 'r':
-						if trace {
-							c.traceInOp("RS+", arg)
-						}
-						err = c.processRemoteSub(arg, false)
-					case 'L', 'l':
-						if trace {
-							c.traceInOp("LS+", arg)
-						}
-						err = c.processRemoteSub(arg, true)
-					}
-				case GATEWAY:
-					if trace {
-						c.traceInOp("RS+", arg)
-					}
-					err = c.processGatewayRSub(arg)
-				case LEAF:
-					if trace {
-						c.traceInOp("LS+", arg)
-					}
-					err = c.processLeafSub(arg)
 				}
 				if err != nil {
 					return err
@@ -779,26 +723,6 @@ func (c *client) parse(buf []byte) error {
 						c.traceInOp("UNSUB", arg)
 					}
 					err = c.processUnsub(arg)
-				case ROUTER:
-					if trace && c.srv != nil {
-						switch c.op {
-						case 'R', 'r':
-							c.traceInOp("RS-", arg)
-						case 'L', 'l':
-							c.traceInOp("LS-", arg)
-						}
-					}
-					err = c.processRemoteUnsub(arg)
-				case GATEWAY:
-					if trace {
-						c.traceInOp("RS-", arg)
-					}
-					err = c.processGatewayRUnsub(arg)
-				case LEAF:
-					if trace {
-						c.traceInOp("LS-", arg)
-					}
-					err = c.processLeafUnsub(arg)
 				}
 				if err != nil {
 					return err
@@ -981,30 +905,7 @@ func (c *client) parse(buf []byte) error {
 				if err := c.overMaxControlLineLimit(arg, mcl); err != nil {
 					return err
 				}
-				var err error
-				if c.kind == ROUTER || c.kind == GATEWAY {
-					switch c.op {
-					case 'R', 'r':
-						if trace {
-							c.traceInOp("RMSG", arg)
-						}
-						err = c.processRoutedMsgArgs(arg)
-					case 'L', 'l':
-						if trace {
-							c.traceInOp("LMSG", arg)
-						}
-						lmsg = true
-						err = c.processRoutedOriginClusterMsgArgs(arg)
-					}
-				} else if c.kind == LEAF {
-					if trace {
-						c.traceInOp("LMSG", arg)
-					}
-					err = c.processLeafMsgArgs(arg)
-				}
-				if err != nil {
-					return err
-				}
+
 				c.drop, c.as, c.state = 0, i+1, MSG_PAYLOAD
 
 				// jump ahead with the index. If this overruns
@@ -1058,9 +959,6 @@ func (c *client) parse(buf []byte) error {
 					arg = buf[c.as : i-c.drop]
 				}
 				if err := c.overMaxControlLineLimit(arg, mcl); err != nil {
-					return err
-				}
-				if err := c.processInfo(arg); err != nil {
 					return err
 				}
 				c.drop, c.as, c.state = 0, i+1, OP_START
@@ -1250,28 +1148,10 @@ func (c *client) clonePubArg(lmsg bool) error {
 	c.argBuf = c.scratch[:0]
 	c.argBuf = append(c.argBuf, c.pa.arg...)
 
-	switch c.kind {
-	case ROUTER, GATEWAY:
-		if lmsg {
-			return c.processRoutedOriginClusterMsgArgs(c.argBuf)
-		}
-		if c.pa.hdr < 0 {
-			return c.processRoutedMsgArgs(c.argBuf)
-		} else {
-			return c.processRoutedHeaderMsgArgs(c.argBuf)
-		}
-	case LEAF:
-		if c.pa.hdr < 0 {
-			return c.processLeafMsgArgs(c.argBuf)
-		} else {
-			return c.processLeafHeaderMsgArgs(c.argBuf)
-		}
-	default:
-		if c.pa.hdr < 0 {
-			return c.processPub(c.argBuf)
-		} else {
-			return c.processHeaderPub(c.argBuf)
-		}
+	if c.pa.hdr < 0 {
+		return c.processPub(c.argBuf)
+	} else {
+		return c.processHeaderPub(c.argBuf)
 	}
 }
 

@@ -615,7 +615,7 @@ func (s *Sublist) reduceCacheCount() {
 
 // Helper function for auto-expanding remote qsubs.
 func isRemoteQSub(sub *subscription) bool {
-	return sub != nil && sub.queue != nil && sub.client != nil && (sub.client.kind == ROUTER || sub.client.kind == LEAF)
+	return false
 }
 
 // UpdateRemoteQSub should be called when we update the weight of an existing
@@ -1425,8 +1425,7 @@ func matchLiteral(literal, subject string) bool {
 func addLocalSub(sub *subscription, subs *[]*subscription, includeLeafHubs bool) {
 	if sub != nil && sub.client != nil {
 		kind := sub.client.kind
-		if kind == CLIENT || kind == SYSTEM || kind == JETSTREAM || kind == ACCOUNT ||
-			(includeLeafHubs && sub.client.isHubLeafNode() /* implied kind==LEAF */) {
+		if kind == CLIENT || kind == SYSTEM || kind == JETSTREAM || kind == ACCOUNT {
 			*subs = append(*subs, sub)
 		}
 	}

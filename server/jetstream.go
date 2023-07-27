@@ -388,15 +388,8 @@ func (s *Server) enableJetStream(cfg JetStreamConfig) error {
 	s.Debugf("     %s", jsAllAPI)
 	s.setupJetStreamExports()
 
-	standAlone, canExtend := s.standAloneMode(), s.canExtendOtherDomain()
-	if standAlone && canExtend && s.getOpts().JetStreamExtHint != jsWillExtend {
-		canExtend = false
-		s.Noticef("Standalone server started in clustered mode do not support extending domains")
-		s.Noticef(`Manually disable standalone mode by setting the JetStream Option "extension_hint: %s"`, jsWillExtend)
-	}
-
 	// Indicate if we will be standalone for checking resource reservations, etc.
-	js.setJetStreamStandAlone(standAlone && !canExtend)
+	js.setJetStreamStandAlone(true)
 
 	// Enable accounts and restore state before starting clustering.
 	if err := s.enableJetStreamAccounts(); err != nil {
@@ -407,22 +400,6 @@ func (s *Server) enableJetStream(cfg JetStreamConfig) error {
 	js.setStarted()
 
 	return nil
-}
-
-const jsNoExtend = "no_extend"
-const jsWillExtend = "will_extend"
-
-// This will check if we have a solicited leafnode that shares the system account
-// and extension is not manually disabled
-func (s *Server) canExtendOtherDomain() bool {
-	opts := s.getOpts()
-	sysAcc := s.SystemAccount().GetName()
-	for _, r := range opts.LeafNode.Remotes {
-		if r.LocalAccount == sysAcc {
-			return true
-		}
-	}
-	return false
 }
 
 func (s *Server) updateJetStreamInfoStatus(enabled bool) {
@@ -515,7 +492,6 @@ func (s *Server) handleOutOfSpace(mset *stream) {
 			Server:   s.Name(),
 			ServerID: s.ID(),
 			Stream:   stream,
-			Cluster:  s.cachedClusterName(),
 			Domain:   s.getOpts().JetStreamDomain,
 		}
 		s.publishAdvisory(nil, JSAdvisoryServerOutOfStorage, adv)
@@ -624,9 +600,6 @@ func (s *Server) configJetStream(acc *Account) error {
 		} else {
 			if err := acc.EnableJetStream(jsLimits); err != nil {
 				return err
-			}
-			if s.gateway.enabled {
-				s.switchAccountToInterestMode(acc.GetName())
 			}
 		}
 	} else if acc != s.SystemAccount() {
@@ -2686,28 +2659,6 @@ func validateJetStreamOptions(o *Options) error {
 		if !isValidName(o.JetStreamDomain) {
 			return fmt.Errorf("invalid domain name: may not contain ., * or >")
 		}
-	}
-	// If not clustered no checks needed past here.
-	if !o.JetStream || o.Cluster.Port == 0 {
-		return nil
-	}
-	if o.ServerName == _EMPTY_ {
-		return fmt.Errorf("jetstream cluster requires `server_name` to be set")
-	}
-	if o.Cluster.Name == _EMPTY_ {
-		return fmt.Errorf("jetstream cluster requires `cluster.name` to be set")
-	}
-
-	h := strings.ToLower(o.JetStreamExtHint)
-	switch h {
-	case jsWillExtend, jsNoExtend, _EMPTY_:
-		o.JetStreamExtHint = h
-	default:
-		return fmt.Errorf("expected 'no_extend' for string value, got '%s'", h)
-	}
-
-	if o.JetStreamMaxCatchup < 0 {
-		return fmt.Errorf("jetstream max catchup cannot be negative")
 	}
 	return nil
 }

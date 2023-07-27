@@ -726,15 +726,12 @@ func (js *jetStream) apiDispatch(sub *subscription, c *client, acc *Account, sub
 	}
 	jsub := rr.psubs[0]
 
-	// If this is directly from a client connection ok to do in place.
-	if c.kind != ROUTER && c.kind != GATEWAY && c.kind != LEAF {
-		start := time.Now()
-		jsub.icb(sub, c, acc, subject, reply, rmsg)
-		if dur := time.Since(start); dur >= readLoopReportThreshold {
-			s.Warnf("Internal subscription on %q took too long: %v", subject, dur)
-		}
-		return
+	start := time.Now()
+	jsub.icb(sub, c, acc, subject, reply, rmsg)
+	if dur := time.Since(start); dur >= readLoopReportThreshold {
+		s.Warnf("Internal subscription on %q took too long: %v", subject, dur)
 	}
+	return
 
 	// If we are here we have received this request over a non-client connection.
 	// We need to make sure not to block. We will send the request to a long-lived
@@ -742,7 +739,7 @@ func (js *jetStream) apiDispatch(sub *subscription, c *client, acc *Account, sub
 
 	// Copy the state. Note the JSAPI only uses the hdr index to piece apart the
 	// header from the msg body. No other references are needed.
-	s.jsAPIRoutedReqs.push(&jsAPIRoutedReq{jsub, sub, acc, subject, reply, copyBytes(rmsg), c.pa})
+	//s.jsAPIRoutedReqs.push(&jsAPIRoutedReq{jsub, sub, acc, subject, reply, copyBytes(rmsg), c.pa})
 }
 
 func (s *Server) processJSAPIRoutedRequests() {
@@ -919,7 +916,7 @@ const badAPIRequestT = "Malformed JetStream API Request: %q"
 func (a *Account) checkJetStream() (enabled, shouldError bool) {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	return a.js != nil, a.nleafs+a.nrleafs == 0
+	return a.js != nil, true
 }
 
 // Request for current usage and limits for this account.

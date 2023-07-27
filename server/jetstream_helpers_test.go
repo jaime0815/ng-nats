@@ -247,39 +247,6 @@ var jsMixedModeGlobalAccountTempl = `
 	accounts {$SYS { users = [ { user: "admin", pass: "s3cr3t!" } ] } }
 `
 
-// Helper function to close and disable leafnodes.
-func (s *Server) closeAndDisableLeafnodes() {
-	var leafs []*client
-	s.mu.Lock()
-	for _, ln := range s.leafs {
-		leafs = append(leafs, ln)
-	}
-	// Disable leafnodes for now.
-	s.leafDisableConnect = true
-	s.mu.Unlock()
-
-	for _, ln := range leafs {
-		ln.closeConnection(Revocation)
-	}
-}
-
-// Helper function to re-enable leafnode connections.
-func (s *Server) reEnableLeafnodes() {
-	s.mu.Lock()
-	// Re-enable leafnodes.
-	s.leafDisableConnect = false
-	s.mu.Unlock()
-}
-
-// Helper to set the remote migrate feature.
-func (s *Server) setJetStreamMigrateOnRemoteLeaf() {
-	s.mu.Lock()
-	for _, cfg := range s.leafRemoteCfgs {
-		cfg.JetStreamClusterMigrate = true
-	}
-	s.mu.Unlock()
-}
-
 // Will add in the mapping for the account to each server.
 func (c *cluster) addSubjectMapping(account, src, dest string) {
 	c.t.Helper()

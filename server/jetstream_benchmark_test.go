@@ -1244,7 +1244,7 @@ func BenchmarkJetStreamObjStore(b *testing.B) {
 		rwRatioCases     = []float64{ReadOnly, WriteOnly, 0.8}
 	)
 
-	// Test with either single node or 3 node cluster
+	// Test with either single node
 	for _, clusterSize := range clusterSizeCases {
 		replicas := clusterSize
 		cName := fmt.Sprintf("N=%d,R=%d", clusterSize, replicas)

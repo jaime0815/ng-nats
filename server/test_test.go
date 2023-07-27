@@ -15,13 +15,10 @@ package server
 
 import (
 	"bytes"
-	"fmt"
 	"math/rand"
-	"net/url"
 	"os"
 	"strings"
 	"testing"
-	"time"
 )
 
 // DefaultTestOptions are default options for the unit tests.
@@ -32,18 +29,6 @@ var DefaultTestOptions = Options{
 	NoSigs:                true,
 	MaxControlLine:        4096,
 	DisableShortFirstPing: true,
-}
-
-func testDefaultClusterOptionsForLeafNodes() *Options {
-	o := DefaultTestOptions
-	o.Port = -1
-	o.Cluster.Host = o.Host
-	o.Cluster.Port = -1
-	o.Gateway.Host = o.Host
-	o.Gateway.Port = -1
-	o.LeafNode.Host = o.Host
-	o.LeafNode.Port = -1
-	return &o
 }
 
 func RunRandClientPortServer() *Server {
@@ -187,18 +172,4 @@ func (c *cluster) randomServerFromCluster(cname string) *Server {
 		}
 	}
 	return nil
-}
-
-func runSolicitLeafServer(lso *Options) (*Server, *Options) {
-	return runSolicitLeafServerToURL(fmt.Sprintf("nats-leaf://%s:%d", lso.LeafNode.Host, lso.LeafNode.Port))
-}
-
-func runSolicitLeafServerToURL(surl string) (*Server, *Options) {
-	o := DefaultTestOptions
-	o.Port = -1
-	o.NoSystemAccount = true
-	rurl, _ := url.Parse(surl)
-	o.LeafNode.Remotes = []*RemoteLeafOpts{{URLs: []*url.URL{rurl}}}
-	o.LeafNode.ReconnectInterval = 100 * time.Millisecond
-	return RunServer(&o), &o
 }

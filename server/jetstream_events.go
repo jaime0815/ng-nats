@@ -255,7 +255,6 @@ type JSServerOutOfSpaceAdvisory struct {
 	Server   string `json:"server"`
 	ServerID string `json:"server_id"`
 	Stream   string `json:"stream,omitempty"`
-	Cluster  string `json:"cluster"`
 	Domain   string `json:"domain,omitempty"`
 }
 
@@ -267,6 +266,5 @@ type JSServerRemovedAdvisory struct {
 	TypedEvent
 	Server   string `json:"server"`
 	ServerID string `json:"server_id"`
-	Cluster  string `json:"cluster"`
 	Domain   string `json:"domain,omitempty"`
 }

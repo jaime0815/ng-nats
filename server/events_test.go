@@ -153,7 +153,7 @@ func TestSystemAccountNewConnection(t *testing.T) {
 		t.Fatalf("Error unmarshalling conns event message: %v", err)
 	} else if conns.Account != acc2.Name {
 		t.Fatalf("Wrong account in conns message: %v", conns)
-	} else if conns.Conns != 1 || conns.TotalConns != 1 || conns.LeafNodes != 0 {
+	} else if conns.Conns != 1 || conns.TotalConns != 1 {
 		t.Fatalf("Wrong counts in conns message: %v", conns)
 	}
 	if !strings.HasPrefix(msg.Subject, fmt.Sprintf("$SYS.ACCOUNT.%s.CONNECT", acc2.Name)) {
@@ -228,7 +228,7 @@ func TestSystemAccountNewConnection(t *testing.T) {
 		t.Fatalf("Error unmarshalling conns event message: %v", err)
 	} else if conns.Account != acc2.Name {
 		t.Fatalf("Wrong account in conns message: %v", conns)
-	} else if conns.Conns != 0 || conns.TotalConns != 0 || conns.LeafNodes != 0 {
+	} else if conns.Conns != 0 || conns.TotalConns != 0 {
 		t.Fatalf("Wrong counts in conns message: %v", conns)
 	}
 	if !strings.HasPrefix(msg.Subject, fmt.Sprintf("$SYS.ACCOUNT.%s.DISCONNECT", acc2.Name)) {
@@ -287,18 +287,6 @@ func TestSystemAccountNewConnection(t *testing.T) {
 	}
 }
 
-func runTrustedLeafServer(t *testing.T) (*Server, *Options) {
-	t.Helper()
-	opts := DefaultOptions()
-	kp, _ := nkeys.FromSeed(oSeed)
-	pub, _ := kp.PublicKey()
-	opts.TrustedKeys = []string{pub}
-	opts.AccountResolver = &MemAccResolver{}
-	opts.LeafNode.Port = -1
-	s := RunServer(opts)
-	return s, opts
-}
-
 func genCredsFile(t *testing.T, jwt string, seed []byte) string {
 	creds := `
 		-----BEGIN NATS USER JWT-----
@@ -316,164 +304,6 @@ func genCredsFile(t *testing.T, jwt string, seed []byte) string {
 		*************************************************************
 		`
 	return createConfFile(t, []byte(strings.Replace(fmt.Sprintf(creds, jwt, seed), "\t\t", "", -1)))
-}
-
-func runSolicitWithCredentials(t *testing.T, opts *Options, creds string) (*Server, *Options, string) {
-	content := `
-		port: -1
-		leafnodes {
-			remotes = [
-				{
-					url: nats-leaf://127.0.0.1:%d
-					credentials: '%s'
-				}
-			]
-		}
-		`
-	config := fmt.Sprintf(content, opts.LeafNode.Port, creds)
-	conf := createConfFile(t, []byte(config))
-	s, opts := RunServerWithConfig(conf)
-	return s, opts, conf
-}
-
-// Helper function to check that a leaf node has connected to our server.
-func checkLeafNodeConnected(t testing.TB, s *Server) {
-	t.Helper()
-	checkLeafNodeConnectedCount(t, s, 1)
-}
-
-// Helper function to check that a leaf node has connected to n server.
-func checkLeafNodeConnectedCount(t testing.TB, s *Server, lnCons int) {
-	t.Helper()
-	checkFor(t, 5*time.Second, 15*time.Millisecond, func() error {
-		if nln := s.NumLeafNodes(); nln != lnCons {
-			return fmt.Errorf("Expected %d connected leafnode(s) for server %v, got %d",
-				lnCons, s, nln)
-		}
-		return nil
-	})
-}
-
-func TestSystemAccountingWithLeafNodes(t *testing.T) {
-	s, opts := runTrustedLeafServer(t)
-	defer s.Shutdown()
-
-	acc, akp := createAccount(s)
-	s.setSystemAccount(acc)
-
-	url := fmt.Sprintf("nats://%s:%d", opts.Host, opts.Port)
-	ncs, err := nats.Connect(url, createUserCreds(t, s, akp))
-	if err != nil {
-		t.Fatalf("Error on connect: %v", err)
-	}
-	defer ncs.Close()
-
-	acc2, akp2 := createAccount(s)
-
-	// Be explicit to only receive the event for acc2 account.
-	sub, _ := ncs.SubscribeSync(fmt.Sprintf("$SYS.ACCOUNT.%s.DISCONNECT", acc2.Name))
-	defer sub.Unsubscribe()
-	ncs.Flush()
-
-	kp, _ := nkeys.CreateUser()
-	pub, _ := kp.PublicKey()
-	nuc := jwt.NewUserClaims(pub)
-	ujwt, err := nuc.Encode(akp2)
-	if err != nil {
-		t.Fatalf("Error generating user JWT: %v", err)
-	}
-	seed, _ := kp.Seed()
-	mycreds := genCredsFile(t, ujwt, seed)
-
-	// Create a server that solicits a leafnode connection.
-	sl, slopts, _ := runSolicitWithCredentials(t, opts, mycreds)
-	defer sl.Shutdown()
-
-	checkLeafNodeConnected(t, s)
-
-	// Compute the expected number of subs on "sl" based on number
-	// of existing subs before creating the sub on "s".
-	expected := int(sl.NumSubscriptions() + 1)
-
-	nc, err := nats.Connect(url, createUserCreds(t, s, akp2), nats.Name("TEST LEAFNODE EVENTS"))
-	if err != nil {
-		t.Fatalf("Error on connect: %v", err)
-	}
-	defer nc.Close()
-	fooSub := natsSubSync(t, nc, "foo")
-	natsFlush(t, nc)
-
-	checkExpectedSubs(t, expected, sl)
-
-	surl := fmt.Sprintf("nats://%s:%d", slopts.Host, slopts.Port)
-	nc2, err := nats.Connect(surl, nats.Name("TEST LEAFNODE EVENTS"))
-	if err != nil {
-		t.Fatalf("Error on connect: %v", err)
-	}
-	defer nc2.Close()
-
-	// Compute the expected number of subs on "s" based on number
-	// of existing subs before creating the sub on "sl".
-	expected = int(s.NumSubscriptions() + 1)
-
-	m := []byte("HELLO WORLD")
-
-	// Now generate some traffic
-	starSub := natsSubSync(t, nc2, "*")
-	for i := 0; i < 10; i++ {
-		nc2.Publish("foo", m)
-		nc2.Publish("bar", m)
-	}
-	natsFlush(t, nc2)
-
-	checkExpectedSubs(t, expected, s)
-
-	// Now send some from the cluster side too.
-	for i := 0; i < 10; i++ {
-		nc.Publish("foo", m)
-		nc.Publish("bar", m)
-	}
-	nc.Flush()
-
-	// Make sure all messages are received
-	for i := 0; i < 20; i++ {
-		if _, err := fooSub.NextMsg(time.Second); err != nil {
-			t.Fatalf("Did not get message: %v", err)
-		}
-	}
-	for i := 0; i < 40; i++ {
-		if _, err := starSub.NextMsg(time.Second); err != nil {
-			t.Fatalf("Did not get message: %v", err)
-		}
-	}
-
-	// Now shutdown the leafnode server since this is where the event tracking should
-	// happen. Right now we do not track local clients to the leafnode server that
-	// solicited to the cluster, but we should track usage once the leafnode connection stops.
-	sl.Shutdown()
-
-	// Make sure we get disconnect event and that tracking is correct.
-	msg, err := sub.NextMsg(time.Second)
-	if err != nil {
-		t.Fatalf("Error receiving msg: %v", err)
-	}
-
-	dem := DisconnectEventMsg{}
-	if err := json.Unmarshal(msg.Data, &dem); err != nil {
-		t.Fatalf("Error unmarshalling disconnect event message: %v", err)
-	}
-	if dem.Sent.Msgs != 10 {
-		t.Fatalf("Expected 10 msgs sent, got %d", dem.Sent.Msgs)
-	}
-	if dem.Sent.Bytes != 110 {
-		t.Fatalf("Expected 110 bytes sent, got %d", dem.Sent.Bytes)
-	}
-	if dem.Received.Msgs != 20 {
-		t.Fatalf("Expected 20 msgs received, got %d", dem.Received.Msgs)
-	}
-	if dem.Received.Bytes != 220 {
-		t.Fatalf("Expected 220 bytes sent, got %d", dem.Received.Bytes)
-	}
 }
 
 func TestSystemAccountDisconnectBadLogin(t *testing.T) {
@@ -904,12 +734,8 @@ func TestAccountReqInfo(t *testing.T) {
 			t.Fatalf("Unexpected value: %v", info.ClientCnt)
 		} else if info.AccountName != pub {
 			t.Fatalf("Unexpected value: %v", info.AccountName)
-		} else if info.LeafCnt != 0 {
-			t.Fatalf("Unexpected value: %v", info.LeafCnt)
 		} else if info.Jwt != jwt {
 			t.Fatalf("Unexpected value: %v", info.Jwt)
-		} else if srv.Cluster != "abc" {
-			t.Fatalf("Unexpected value: %v", srv.Cluster)
 		} else if srv.Name != s.Name() {
 			t.Fatalf("Unexpected value: %v", srv.Name)
 		} else if srv.Host != opts.Host {

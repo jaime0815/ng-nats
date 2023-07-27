@@ -40,6 +40,14 @@ var (
 )
 
 const (
+	_CRLF_  = "\r\n"
+	_EMPTY_ = ""
+
+	gwReplyPrefix    = "_GR_."
+	gwReplyPrefixLen = len(gwReplyPrefix)
+)
+
+const (
 	// VERSION is the current version for the server.
 	VERSION = "2.9.20"
 

@@ -860,8 +860,6 @@ func TestTLSTimeoutNotReportSlowConsumer(t *testing.T) {
 		t.Fatalf("Unable to load config file: %v", err)
 	}
 
-	// Override TLSTimeout to very small value so that handshake fails
-	oa.Cluster.TLSTimeout = 0.0000001
 	sa := RunServer(oa)
 	defer sa.Shutdown()
 
@@ -938,10 +936,6 @@ func TestTLSHandshakeFailureMemUsage(t *testing.T) {
 			switch i {
 			case 0:
 				port = opts.Port
-			case 1:
-				port = s.ClusterAddr().Port
-			case 2:
-				port = s.GatewayAddr().Port
 			}
 
 			varz, _ := s.Varz(nil)

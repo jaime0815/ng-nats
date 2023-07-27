@@ -3314,14 +3314,7 @@ func (mset *stream) processDirectGetRequest(_ *subscription, c *client, _ *Accou
 		return
 	}
 
-	inlineOk := c.kind != ROUTER && c.kind != GATEWAY && c.kind != LEAF
-	if !inlineOk {
-		dg := dgPool.Get().(*directGetReq)
-		dg.req, dg.reply = req, reply
-		mset.gets.push(dg)
-	} else {
-		mset.getDirectRequest(&req, reply)
-	}
+	mset.getDirectRequest(&req, reply)
 }
 
 // This is for direct get by last subject which is part of the subject itself.
@@ -3357,14 +3350,7 @@ func (mset *stream) processDirectGetLastBySubjectRequest(_ *subscription, c *cli
 
 	req := JSApiMsgGetRequest{LastFor: key}
 
-	inlineOk := c.kind != ROUTER && c.kind != GATEWAY && c.kind != LEAF
-	if !inlineOk {
-		dg := dgPool.Get().(*directGetReq)
-		dg.req, dg.reply = req, reply
-		mset.gets.push(dg)
-	} else {
-		mset.getDirectRequest(&req, reply)
-	}
+	mset.getDirectRequest(&req, reply)
 }
 
 // Do actual work on a direct msg request.

@@ -901,7 +901,7 @@ func (o *consumer) setLeader(isLeader bool) {
 	}
 
 	mset.mu.RLock()
-	s, stream, lseq := mset.srv, mset.cfg.Name, mset.lseq
+	stream, lseq := mset.cfg.Name, mset.lseq
 	mset.mu.RUnlock()
 
 	// Register as a leader with our parent stream.
@@ -955,15 +955,6 @@ func (o *consumer) setLeader(isLeader bool) {
 		o.acc.sl.registerNotification(o.cfg.DeliverSubject, o.cfg.DeliverGroup, o.inch)
 		if o.active = <-o.inch; o.active {
 			o.checkQueueInterest()
-		}
-
-		// Check gateways in case they are enabled.
-		if s.gateway.enabled {
-			if !o.active {
-				o.active = s.hasGatewayInterest(o.acc.Name, o.cfg.DeliverSubject)
-			}
-			stopAndClearTimer(&o.gwdtmr)
-			o.gwdtmr = time.AfterFunc(time.Second, func() { o.watchGWinterest() })
 		}
 	}
 
@@ -1113,34 +1104,12 @@ func (o *consumer) hasDeliveryInterest(localInterest bool) bool {
 		o.mu.Unlock()
 		return false
 	}
-	acc := o.acc
-	deliver := o.cfg.DeliverSubject
 	o.mu.Unlock()
 
 	if localInterest {
 		return true
 	}
 
-	// If we are here check gateways.
-	if s := acc.srv; s != nil && s.hasGatewayInterest(acc.Name, deliver) {
-		return true
-	}
-	return false
-}
-
-func (s *Server) hasGatewayInterest(account, subject string) bool {
-	gw := s.gateway
-	if !gw.enabled {
-		return false
-	}
-	gw.RLock()
-	defer gw.RUnlock()
-	for _, gwc := range gw.outo {
-		psi, qr := gwc.gatewayInterest(account, subject)
-		if psi || qr != nil {
-			return true
-		}
-	}
 	return false
 }
 
@@ -2406,10 +2375,6 @@ func (o *consumer) nextWaiting(sz int) *waitingRequest {
 			rr := wr.acc.sl.Match(wr.interest)
 			if len(rr.psubs)+len(rr.qsubs) > 0 {
 				return o.waiting.pop()
-			} else if time.Since(wr.received) < defaultGatewayRecentSubExpiration && (o.srv.leafNodeEnabled || o.srv.gateway.enabled) {
-				return o.waiting.pop()
-			} else if o.srv.gateway.enabled && o.srv.hasGatewayInterest(wr.acc.Name, wr.interest) {
-				return o.waiting.pop()
 			}
 		} else {
 			// We do check for expiration in `processWaiting`, but it is possible to hit the expiry here, and not there.
@@ -2725,7 +2690,7 @@ func (o *consumer) processWaiting(eos bool) (int, int, int, time.Time) {
 	}
 
 	var expired, brp int
-	s, now := o.srv, time.Now()
+	now := time.Now()
 
 	// Signals interior deletes, which we will compact if needed.
 	var hid bool
@@ -2754,15 +2719,6 @@ func (o *consumer) processWaiting(eos bool) (int, int, int, time.Time) {
 		// Now check interest.
 		rr := wr.acc.sl.Match(wr.interest)
 		interest := len(rr.psubs)+len(rr.qsubs) > 0
-		if !interest && (s.leafNodeEnabled || s.gateway.enabled) {
-			// If we are here check on gateways and leaf nodes (as they can mask gateways on the other end).
-			// If we have interest or the request is too young break and do not expire.
-			if time.Since(wr.received) < defaultGatewayRecentSubExpiration {
-				interest = true
-			} else if s.gateway.enabled && s.hasGatewayInterest(wr.acc.Name, wr.interest) {
-				interest = true
-			}
-		}
 		// If interest, update batch pending requests counter and update fexp timer.
 		if interest {
 			brp += wr.n

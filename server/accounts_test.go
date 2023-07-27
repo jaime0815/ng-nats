@@ -1853,19 +1853,6 @@ func TestAccountRequestReplyTrackLatency(t *testing.T) {
 	}
 }
 
-// Helper function to generate next opts to make sure no port conflicts etc.
-func nextServerOpts(opts *Options) *Options {
-	nopts := *opts
-	nopts.Port = -1
-	nopts.Cluster.Port = -1
-	nopts.HTTPPort = -1
-	if nopts.Gateway.Name != "" {
-		nopts.Gateway.Port = -1
-	}
-	nopts.ServerName = ""
-	return &nopts
-}
-
 // Helper function to check that a server (or list of servers) have the
 // expected number of subscriptions.
 func checkExpectedSubs(t *testing.T, expected int, servers ...*Server) {
@@ -2280,7 +2267,6 @@ func TestAccountNoDeadlockOnQueueSubRouteMapUpdate(t *testing.T) {
 	}
 
 	opts2 := DefaultOptions()
-	opts2.Routes = RoutesFromStr(fmt.Sprintf("nats://%s:%d", opts.Cluster.Host, opts.Cluster.Port))
 	s2 := RunServer(opts2)
 	defer s2.Shutdown()
 
@@ -2832,7 +2818,6 @@ func TestAccountRouteMappingsWithOriginClusterFilter(t *testing.T) {
 		t.Fatalf("Expected pending to be %d, got %d", total, pending)
 	}
 
-	s.setClusterName("SYN")
 	sub, _ = nc.SubscribeSync("bar")
 	for i := 0; i < total; i++ {
 		nc.Publish("foo", nil)
@@ -3324,9 +3309,6 @@ func TestAccountLimitsServerConfig(t *testing.T) {
 	if mc := acc.MaxActiveConnections(); mc != 5 {
 		t.Fatalf("Did not set MaxActiveConnections properly, expected 5, got %d", mc)
 	}
-	if mlc := acc.MaxActiveLeafNodes(); mlc != 1 {
-		t.Fatalf("Did not set MaxActiveLeafNodes properly, expected 1, got %d", mlc)
-	}
 
 	// Do quick test on connections, but if they are registered above should be good.
 	for i := 0; i < 5; i++ {
@@ -3462,77 +3444,4 @@ func TestAccountImportOwnExport(t *testing.T) {
 	natsSub(t, nc, "echo", func(m *nats.Msg) { m.Respond(nil) })
 	_, err := nc.Request("echo", []byte("request"), time.Second)
 	require_NoError(t, err)
-}
-
-// Test for a bug that would cause duplicate deliveries in certain situations when
-// service export/imports and leafnodes involved.
-// https://github.com/nats-io/nats-server/issues/3191
-func TestAccountImportDuplicateResponseDeliveryWithLeafnodes(t *testing.T) {
-	conf := createConfFile(t, []byte(`
-		port: -1
-		accounts: {
-			A: {
-				users = [{user: A, password: P}]
-				exports: [ { service: "foo", response_type: stream } ]
-			}
-			B: {
-				users = [{user: B, password: P}]
-				imports: [ { service: {account: "A", subject:"foo"} } ]
-			}
-		}
-		leaf { listen: "127.0.0.1:17222" }
-	`))
-	s, _ := RunServerWithConfig(conf)
-	defer s.Shutdown()
-
-	// Requestors will connect to account B.
-	nc, err := nats.Connect(s.ClientURL(), nats.UserInfo("B", "P"))
-	require_NoError(t, err)
-	defer nc.Close()
-
-	// By sending a request (regardless of no responders), this will trigger a wildcard _R_ subscription since
-	// we do not have a leafnode connected.
-	nc.PublishRequest("foo", "reply", nil)
-	nc.Flush()
-
-	// Now connect the LN. This will be where the service responder lives.
-	conf = createConfFile(t, []byte(`
-		port: -1
-		leaf {
-			remotes [ { url: "nats://A:P@127.0.0.1:17222" } ]
-		}
-	`))
-	ln, _ := RunServerWithConfig(conf)
-	defer ln.Shutdown()
-	checkLeafNodeConnected(t, s)
-
-	// Now attach a responder to the LN.
-	lnc, err := nats.Connect(ln.ClientURL())
-	require_NoError(t, err)
-	defer lnc.Close()
-
-	lnc.Subscribe("foo", func(m *nats.Msg) {
-		m.Respond([]byte("bar"))
-	})
-	lnc.Flush()
-
-	// Make sure it works, but request only wants one, so need second test to show failure, but
-	// want to make sure we are wired up correctly.
-	_, err = nc.Request("foo", nil, time.Second)
-	require_NoError(t, err)
-
-	// Now setup inbox reply so we can check if we get multiple responses.
-	reply := nats.NewInbox()
-	sub, err := nc.SubscribeSync(reply)
-	require_NoError(t, err)
-
-	nc.PublishRequest("foo", reply, nil)
-
-	// Do another to make sure we know the other request will have been processed too.
-	_, err = nc.Request("foo", nil, time.Second)
-	require_NoError(t, err)
-
-	if n, _, _ := sub.Pending(); n > 1 {
-		t.Fatalf("Expected only 1 response, got %d", n)
-	}
 }
