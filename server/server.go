@@ -253,10 +253,6 @@ type Server struct {
 	cnMu sync.RWMutex
 	cn   string
 
-	// For registering raft nodes with the server.
-	rnMu      sync.RWMutex
-	raftNodes map[string]RaftNode
-
 	// For mapping from a raft node name back to a server name and cluster. Node has to be in the same domain.
 	nodeToInfo sync.Map
 
@@ -278,19 +274,15 @@ type Server struct {
 	rateLimitLogging   sync.Map
 	rateLimitLoggingCh chan time.Duration
 
-	// Total outstanding catchup bytes in flight.
-	gcbMu     sync.RWMutex
-	gcbOut    int64
-	gcbOutMax int64 // Taken from JetStreamMaxCatchup or defaultMaxTotalCatchupOutBytes
-	// A global chanel to kick out stalled catchup sequences.
-	gcbKick chan struct{}
-
 	// Total outbound syncRequests
 	syncOutSem chan struct{}
 
 	// Queue to process JS API requests that come from routes (or gateways)
 	jsAPIRoutedReqs *ipQueue[*jsAPIRoutedReq]
 }
+
+// Maximum requests for the whole server that can be in flight.
+const maxConcurrentSyncRequests = 8
 
 // For tracking JS nodes.
 type nodeInfo struct {
@@ -1969,9 +1961,6 @@ func (s *Server) Shutdown() {
 	// that pending pull requests are invalid.
 	s.signalPullConsumers()
 
-	// Transfer off any raft nodes that we are a leader by stepping them down.
-	s.stepdownRaftNodes()
-
 	// Shutdown the eventing system as needed.
 	// This is done first to send out any messages for
 	// account status. We will also clean up any
@@ -2003,9 +1992,6 @@ func (s *Server) Shutdown() {
 
 	// Now check jetstream.
 	s.shutdownJetStream()
-
-	// Now shutdown the nodes
-	s.shutdownRaftNodes()
 
 	s.mu.Lock()
 	conns := make(map[uint64]*client)
@@ -3525,16 +3511,6 @@ func (s *Server) lameDuckMode() {
 		gp *= -1
 	}
 	s.mu.Unlock()
-
-	// If we are running any raftNodes transfer leaders.
-	if hadTransfers := s.transferRaftLeaders(); hadTransfers {
-		// They will transfer leadership quickly, but wait here for a second.
-		select {
-		case <-time.After(time.Second):
-		case <-s.quitCh:
-			return
-		}
-	}
 
 	// Wait for accept loops to be done to make sure that no new
 	// client can connect

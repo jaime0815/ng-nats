@@ -30,9 +30,10 @@ import (
 	"time"
 
 	"github.com/minio/highwayhash"
-	"github.com/nats-io/nats-server/v2/server/sysmem"
 	"github.com/nats-io/nkeys"
 	"github.com/nats-io/nuid"
+
+	"github.com/nats-io/nats-server/v2/server/sysmem"
 )
 
 // JetStreamConfig determines this server's configuration.
@@ -103,7 +104,6 @@ type jetStream struct {
 	mu            sync.RWMutex
 	srv           *Server
 	config        JetStreamConfig
-	cluster       *jetStreamCluster
 	accounts      map[string]*jsAccount
 	apiSubs       *Sublist
 	started       time.Time
@@ -329,11 +329,6 @@ func (s *Server) checkStoreDir(cfg *JetStreamConfig) error {
 // enableJetStream will start up the JetStream subsystem.
 func (s *Server) enableJetStream(cfg JetStreamConfig) error {
 	js := &jetStream{srv: s, config: cfg, accounts: make(map[string]*jsAccount), apiSubs: NewSublistNoCache()}
-	s.gcbMu.Lock()
-	if s.gcbOutMax = s.getOpts().JetStreamMaxCatchup; s.gcbOutMax == 0 {
-		s.gcbOutMax = defaultMaxTotalCatchupOutBytes
-	}
-	s.gcbMu.Unlock()
 
 	s.mu.Lock()
 	s.js = js
@@ -408,13 +403,6 @@ func (s *Server) enableJetStream(cfg JetStreamConfig) error {
 		return err
 	}
 
-	// If we are in clustered mode go ahead and start the meta controller.
-	if !standAlone || canExtend {
-		if err := s.enableJetStreamClustering(); err != nil {
-			return err
-		}
-	}
-
 	// Mark when we are up and running.
 	js.setStarted()
 
@@ -431,11 +419,6 @@ func (s *Server) canExtendOtherDomain() bool {
 	sysAcc := s.SystemAccount().GetName()
 	for _, r := range opts.LeafNode.Remotes {
 		if r.LocalAccount == sysAcc {
-			for _, denySub := range r.DenyImports {
-				if subjectIsSubsetMatch(denySub, raftAllSubj) {
-					return false
-				}
-			}
 			return true
 		}
 	}
@@ -548,42 +531,11 @@ func (s *Server) DisableJetStream() error {
 
 	s.setJetStreamDisabled()
 
-	if s.JetStreamIsClustered() {
-		isLeader := s.JetStreamIsLeader()
-		js, cc := s.getJetStreamCluster()
-		if js == nil {
-			s.shutdownJetStream()
-			return nil
-		}
-		js.mu.RLock()
-		meta := cc.meta
-		js.mu.RUnlock()
-
-		if meta != nil {
-			if isLeader {
-				s.Warnf("JetStream initiating meta leader transfer")
-				meta.StepDown()
-				select {
-				case <-s.quitCh:
-					return nil
-				case <-time.After(2 * time.Second):
-				}
-				if !s.JetStreamIsCurrent() {
-					s.Warnf("JetStream timeout waiting for meta leader transfer")
-				}
-			}
-			meta.Delete()
-		}
-	}
-
 	// Update our info status.
 	s.updateJetStreamInfoStatus(false)
 
 	// Normal shutdown.
 	s.shutdownJetStream()
-
-	// Shut down the RAFT groups.
-	s.shutdownRaftNodes()
 
 	return nil
 }
@@ -783,8 +735,8 @@ func (js *jetStream) setJetStreamStandAlone(isStandAlone bool) {
 
 	if isStandAlone {
 		js.accountPurge, _ = js.srv.systemSubscribe(JSApiAccountPurge, _EMPTY_, false, nil, js.srv.jsLeaderAccountPurgeRequest)
-	} else if js.accountPurge != nil {
-		js.srv.sysUnsubscribe(js.accountPurge)
+	} else {
+		panic("only support standalone mode")
 	}
 }
 
@@ -917,19 +869,6 @@ func (s *Server) shutdownJetStream() {
 	js.accounts = nil
 
 	var qch chan struct{}
-
-	if cc := js.cluster; cc != nil {
-		if cc.qch != nil {
-			qch = cc.qch
-			cc.qch = nil
-		}
-		js.stopUpdatesSub()
-		if cc.c != nil {
-			cc.c.closeConnection(ClientClosed)
-			cc.c = nil
-		}
-		cc.meta = nil
-	}
 	js.mu.Unlock()
 
 	// If we were clustered signal the monitor cluster go routine.
@@ -1049,20 +988,8 @@ func (a *Account) EnableJetStream(limits map[string]JetStreamAccountLimits) erro
 		return err
 	}
 
-	sysNode := s.Node()
-
 	jsa := &jsAccount{js: js, account: a, limits: limits, streams: make(map[string]*stream), sendq: sendq, usage: make(map[string]*jsaStorage)}
 	jsa.storeDir = filepath.Join(js.config.StoreDir, a.Name)
-
-	// A single server does not need to do the account updates at this point.
-	if js.cluster != nil || !s.standAloneMode() {
-		jsa.usageMu.Lock()
-		jsa.utimer = time.AfterFunc(usageTick, jsa.sendClusterUsageUpdateTimer)
-		// Cluster mode updates to resource usage. System internal prevents echos.
-		jsa.updatesPub = fmt.Sprintf(jsaUpdatesPubT, a.Name, sysNode)
-		jsa.updatesSub, _ = s.sysSubscribe(fmt.Sprintf(jsaUpdatesSubT, a.Name), jsa.remoteUpdateUsage)
-		jsa.usageMu.Unlock()
-	}
 
 	js.accounts[a.Name] = jsa
 	js.mu.Unlock()
@@ -1380,7 +1307,7 @@ func (a *Account) EnableJetStream(limits map[string]JetStreamAccountLimits) erro
 				// the consumer can reconnect. We will create it as a durable and switch it.
 				cfg.ConsumerConfig.Durable = ofi.Name()
 			}
-			obs, err := e.mset.addConsumerWithAssignment(&cfg.ConsumerConfig, _EMPTY_, nil, true)
+			obs, err := e.mset.addConsumerInternal(&cfg.ConsumerConfig, _EMPTY_, true)
 			if err != nil {
 				s.Warnf("    Error adding consumer %q: %v", cfg.Name, err)
 				continue
@@ -1573,7 +1500,7 @@ func diffCheckedLimits(a, b map[string]JetStreamAccountLimits) map[string]JetStr
 // JetStreamUsage reports on JetStream usage and limits for an account.
 func (a *Account) JetStreamUsage() JetStreamAccountStats {
 	a.mu.RLock()
-	jsa, aname := a.js, a.Name
+	jsa := a.js
 	accJsLimits := a.jsLimits
 	a.mu.RUnlock()
 
@@ -1618,42 +1545,21 @@ func (a *Account) JetStreamUsage() JetStreamAccountStats {
 			}
 		}
 		jsa.usageMu.RUnlock()
-		if cc := jsa.js.cluster; cc != nil {
-			sas := cc.streams[aname]
-			if defaultTier {
-				stats.Streams = len(sas)
-			}
-			for _, sa := range sas {
-				stats.Consumers += len(sa.consumers)
-				if !defaultTier {
-					tier := tierName(sa.Config)
-					u, ok := stats.Tiers[tier]
-					if !ok {
-						u = JetStreamTier{}
-					}
-					u.Streams++
-					stats.Streams++
-					u.Consumers += len(sa.consumers)
-					stats.Tiers[tier] = u
+		if defaultTier {
+			stats.Streams = len(jsa.streams)
+		}
+		for _, mset := range jsa.streams {
+			consCount := mset.numConsumers()
+			stats.Consumers += consCount
+			if !defaultTier {
+				u, ok := stats.Tiers[mset.tier]
+				if !ok {
+					u = JetStreamTier{}
 				}
-			}
-		} else {
-			if defaultTier {
-				stats.Streams = len(jsa.streams)
-			}
-			for _, mset := range jsa.streams {
-				consCount := mset.numConsumers()
-				stats.Consumers += consCount
-				if !defaultTier {
-					u, ok := stats.Tiers[mset.tier]
-					if !ok {
-						u = JetStreamTier{}
-					}
-					u.Streams++
-					stats.Streams++
-					u.Consumers += consCount
-					stats.Tiers[mset.tier] = u
-				}
+				u.Streams++
+				stats.Streams++
+				u.Consumers += consCount
+				stats.Tiers[mset.tier] = u
 			}
 		}
 		jsa.mu.RUnlock()
@@ -1851,7 +1757,6 @@ func (jsa *jsAccount) checkAndSyncUsage(tierName string, storeType StorageType) 
 		total += int64(state.Bytes)
 	}
 
-	var needClusterUpdate bool
 	// If we do not match on our calculations compute delta and adjust.
 	if storeType == MemoryStorage {
 		if total != usage.local.mem {
@@ -1861,7 +1766,6 @@ func (jsa *jsAccount) checkAndSyncUsage(tierName string, storeType StorageType) 
 			usage.local.mem += delta
 			usage.total.mem += delta
 			atomic.AddInt64(&js.memUsed, delta)
-			needClusterUpdate = true
 		}
 	} else {
 		if total != usage.local.store {
@@ -1871,13 +1775,7 @@ func (jsa *jsAccount) checkAndSyncUsage(tierName string, storeType StorageType) 
 			usage.local.store += delta
 			usage.total.store += delta
 			atomic.AddInt64(&js.storeUsed, delta)
-			needClusterUpdate = true
 		}
-	}
-
-	// Publish our local updates if in clustered mode.
-	if needClusterUpdate && js.isClusteredNoLock() {
-		jsa.sendClusterUsageUpdate()
 	}
 }
 
@@ -1886,10 +1784,6 @@ func (jsa *jsAccount) checkAndSyncUsage(tierName string, storeType StorageType) 
 func (jsa *jsAccount) updateUsage(tierName string, storeType StorageType, delta int64) {
 	// jsa.js is immutable and cannot be nil, so ok w/o lock.
 	js := jsa.js
-	// updateUsage() may be invoked under the mset's lock, so we can't get
-	// the js' lock to check if clustered. So use this function that make
-	// use of an atomic to do the check without having data race reports.
-	isClustered := js.isClusteredNoLock()
 
 	var needsCheck bool
 	jsa.usageMu.Lock()
@@ -1908,10 +1802,6 @@ func (jsa *jsAccount) updateUsage(tierName string, storeType StorageType, delta 
 		s.total.store += delta
 		atomic.AddInt64(&js.storeUsed, delta)
 		needsCheck = s.local.store < 0
-	}
-	// Publish our local updates if in clustered mode.
-	if isClustered {
-		jsa.sendClusterUsageUpdate()
 	}
 	jsa.usageMu.Unlock()
 
@@ -2019,11 +1909,11 @@ func isSameTier(cfgA, cfgB *StreamConfig) bool {
 	return cfgA.Replicas == cfgB.Replicas
 }
 
-func (jsa *jsAccount) jetStreamAndClustered() (*jetStream, bool) {
+func (jsa *jsAccount) jetStream() *jetStream {
 	jsa.mu.RLock()
 	js := jsa.js
 	jsa.mu.RUnlock()
-	return js, js.isClustered()
+	return js
 }
 
 // jsa.usageMu read lock should be held.
@@ -2221,7 +2111,6 @@ func (js *jetStream) usageStats() *JetStreamStats {
 	stats.Accounts = len(js.accounts)
 	stats.ReservedMemory = uint64(js.memReserved)
 	stats.ReservedStore = uint64(js.storeReserved)
-	s := js.srv
 	js.mu.RUnlock()
 	stats.API.Total = uint64(atomic.LoadInt64(&js.apiTotal))
 	stats.API.Errors = uint64(atomic.LoadInt64(&js.apiErrors))
@@ -2237,7 +2126,6 @@ func (js *jetStream) usageStats() *JetStreamStats {
 		used = 0
 	}
 	stats.Store = uint64(used)
-	stats.HAAssets = s.numRaftNodes()
 	return &stats
 }
 
@@ -2735,26 +2623,12 @@ func canonicalName(name string) string {
 
 // To throttle the out of resources errors.
 func (s *Server) resourcesExeededError() {
-	var didAlert bool
-
 	s.rerrMu.Lock()
 	if now := time.Now(); now.Sub(s.rerrLast) > 10*time.Second {
 		s.Errorf("JetStream resource limits exceeded for server")
 		s.rerrLast = now
-		didAlert = true
 	}
 	s.rerrMu.Unlock()
-
-	// If we are meta leader we should relinguish that here.
-	if didAlert {
-		if js := s.getJetStream(); js != nil {
-			js.mu.RLock()
-			if cc := js.cluster; cc != nil && cc.isLeader() {
-				cc.meta.StepDown()
-			}
-			js.mu.RUnlock()
-		}
-	}
 }
 
 // For validating options.

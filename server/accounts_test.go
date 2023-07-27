@@ -1853,191 +1853,44 @@ func TestAccountRequestReplyTrackLatency(t *testing.T) {
 	}
 }
 
-// This will test for leaks in the remote latency tracking via client.rrTracking
-func TestAccountTrackLatencyRemoteLeaks(t *testing.T) {
-	optsA, err := ProcessConfigFile("./configs/seed.conf")
-	require_NoError(t, err)
-	optsA.NoSigs, optsA.NoLog = true, true
-	optsA.ServerName = "A"
-	srvA := RunServer(optsA)
-	defer srvA.Shutdown()
-	optsB := nextServerOpts(optsA)
-	optsB.Routes = RoutesFromStr(fmt.Sprintf("nats://%s:%d", optsA.Cluster.Host, optsA.Cluster.Port))
-	optsB.ServerName = "B"
-	srvB := RunServer(optsB)
-	defer srvB.Shutdown()
-
-	checkClusterFormed(t, srvA, srvB)
-	srvs := []*Server{srvA, srvB}
-
-	// Now add in the accounts and setup tracking.
-	for _, s := range srvs {
-		s.SetSystemAccount(globalAccountName)
-		fooAcc, _ := s.RegisterAccount("$foo")
-		fooAcc.AddServiceExport("track.service", nil)
-		fooAcc.TrackServiceExport("track.service", "results")
-		barAcc, _ := s.RegisterAccount("$bar")
-		if err := barAcc.AddServiceImport(fooAcc, "req", "track.service"); err != nil {
-			t.Fatalf("Failed to import: %v", err)
-		}
+// Helper function to generate next opts to make sure no port conflicts etc.
+func nextServerOpts(opts *Options) *Options {
+	nopts := *opts
+	nopts.Port = -1
+	nopts.Cluster.Port = -1
+	nopts.HTTPPort = -1
+	if nopts.Gateway.Name != "" {
+		nopts.Gateway.Port = -1
 	}
+	nopts.ServerName = ""
+	return &nopts
+}
 
-	getClient := func(s *Server, name string) *client {
-		t.Helper()
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		for _, c := range s.clients {
-			c.mu.Lock()
-			n := c.opts.Name
-			c.mu.Unlock()
-			if n == name {
-				return c
+// Helper function to check that a server (or list of servers) have the
+// expected number of subscriptions.
+func checkExpectedSubs(t *testing.T, expected int, servers ...*Server) {
+	t.Helper()
+	checkFor(t, 4*time.Second, 10*time.Millisecond, func() error {
+		for _, s := range servers {
+			if numSubs := int(s.NumSubscriptions()); numSubs != expected {
+				return fmt.Errorf("Expected %d subscriptions for server %q, got %d", expected, s.ID(), numSubs)
 			}
 		}
-		t.Fatalf("Did not find client %q on server %q", name, s.info.ID)
 		return nil
-	}
+	})
+}
 
-	// Test with a responder on second server, srvB. but they will not respond.
-	cfooNC := natsConnect(t, srvB.ClientURL(), nats.Name("foo"))
-	defer cfooNC.Close()
-	cfoo := getClient(srvB, "foo")
-	fooAcc, _ := srvB.LookupAccount("$foo")
-	if err := cfoo.registerWithAccount(fooAcc); err != nil {
-		t.Fatalf("Error registering client with 'foo' account: %v", err)
-	}
-
-	// Set new limits
-	for _, srv := range srvs {
-		fooAcc, _ := srv.LookupAccount("$foo")
-		err := fooAcc.SetServiceExportResponseThreshold("track.service", 5*time.Millisecond)
+func checkSubInterest(t *testing.T, s *Server, accName, subject string, timeout time.Duration) {
+	t.Helper()
+	checkFor(t, timeout, 15*time.Millisecond, func() error {
+		acc, err := s.LookupAccount(accName)
 		if err != nil {
-			t.Fatalf("Error setting response threshold: %v", err)
+			return fmt.Errorf("error looking up account %q: %v", accName, err)
 		}
-	}
-
-	// Now setup the responder under cfoo and the listener for the results
-	time.Sleep(50 * time.Millisecond)
-	baseSubs := int(srvA.NumSubscriptions())
-	fooSub := natsSubSync(t, cfooNC, "track.service")
-	natsFlush(t, cfooNC)
-	// Wait for it to propagate.
-	checkExpectedSubs(t, baseSubs+1, srvA)
-
-	cbarNC := natsConnect(t, srvA.ClientURL(), nats.Name("bar"))
-	defer cbarNC.Close()
-	cbar := getClient(srvA, "bar")
-
-	barAcc, _ := srvA.LookupAccount("$bar")
-	if err := cbar.registerWithAccount(barAcc); err != nil {
-		t.Fatalf("Error registering client with 'bar' account: %v", err)
-	}
-
-	readFooMsg := func() {
-		t.Helper()
-		if _, err := fooSub.NextMsg(time.Second); err != nil {
-			t.Fatalf("Did not receive foo msg: %v", err)
-		}
-	}
-
-	// Send 2 requests
-	natsSubSync(t, cbarNC, "resp")
-
-	natsPubReq(t, cbarNC, "req", "resp", []byte("help"))
-	natsPubReq(t, cbarNC, "req", "resp", []byte("help"))
-
-	readFooMsg()
-	readFooMsg()
-
-	var rc *client
-	// Pull out first client
-	srvB.mu.Lock()
-	for _, rc = range srvB.clients {
-		if rc != nil {
-			break
-		}
-	}
-	srvB.mu.Unlock()
-
-	tracking := func() int {
-		rc.mu.Lock()
-		var nt int
-		if rc.rrTracking != nil {
-			nt = len(rc.rrTracking.rmap)
-		}
-		rc.mu.Unlock()
-		return nt
-	}
-
-	expectTracking := func(expected int) {
-		t.Helper()
-		checkFor(t, time.Second, 10*time.Millisecond, func() error {
-			if numTracking := tracking(); numTracking != expected {
-				return fmt.Errorf("Expected to have %d tracking replies, got %d", expected, numTracking)
-			}
+		if acc.SubscriptionInterest(subject) {
 			return nil
-		})
-	}
-
-	expectTracking(2)
-	// Make sure these remote tracking replies honor the current respThresh for a service export.
-	time.Sleep(10 * time.Millisecond)
-	expectTracking(0)
-	// Also make sure tracking is removed
-	rc.mu.Lock()
-	removed := rc.rrTracking == nil
-	rc.mu.Unlock()
-	if !removed {
-		t.Fatalf("Expected the rrTracking to be removed")
-	}
-
-	// Now let's test that a lower response threshold is picked up.
-	fSub := natsSubSync(t, cfooNC, "foo")
-	natsFlush(t, cfooNC)
-
-	// Wait for it to propagate.
-	checkExpectedSubs(t, baseSubs+4, srvA)
-
-	// queue up some first. We want to test changing when rrTracking exists.
-	natsPubReq(t, cbarNC, "req", "resp", []byte("help"))
-	readFooMsg()
-	expectTracking(1)
-
-	for _, s := range srvs {
-		fooAcc, _ := s.LookupAccount("$foo")
-		barAcc, _ := s.LookupAccount("$bar")
-		fooAcc.AddServiceExport("foo", nil)
-		fooAcc.TrackServiceExport("foo", "foo.results")
-		fooAcc.SetServiceExportResponseThreshold("foo", time.Millisecond)
-		barAcc.AddServiceImport(fooAcc, "foo", "foo")
-	}
-
-	natsSubSync(t, cbarNC, "reply")
-	natsPubReq(t, cbarNC, "foo", "reply", []byte("help"))
-	if _, err := fSub.NextMsg(time.Second); err != nil {
-		t.Fatalf("Did not receive foo msg: %v", err)
-	}
-	expectTracking(2)
-
-	rc.mu.Lock()
-	lrt := rc.rrTracking.lrt
-	rc.mu.Unlock()
-	if lrt != time.Millisecond {
-		t.Fatalf("Expected lrt of %v, got %v", time.Millisecond, lrt)
-	}
-
-	// Now make sure we clear on close.
-	rc.closeConnection(ClientClosed)
-
-	// Actual tear down will be not inline.
-	checkFor(t, time.Second, 5*time.Millisecond, func() error {
-		rc.mu.Lock()
-		removed = rc.rrTracking == nil
-		rc.mu.Unlock()
-		if !removed {
-			return fmt.Errorf("Expected the rrTracking to be removed after client close")
 		}
-		return nil
+		return fmt.Errorf("no subscription interest for account %q on %q", accName, subject)
 	})
 }
 

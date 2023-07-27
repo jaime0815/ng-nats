@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/rand"
 	"net"
 	"net/url"
 	"reflect"
@@ -333,4 +334,38 @@ func copyStrings(src []string) []string {
 	dst := make([]string, len(src))
 	copy(dst, src)
 	return dst
+}
+
+const jscAllSubj = "$JSC.>"
+
+func syncSubjForStream() string {
+	return syncSubject("$JSC.SYNC")
+}
+
+func syncReplySubject() string {
+	return syncSubject("$JSC.R")
+}
+
+func infoReplySubject() string {
+	return syncSubject("$JSC.R")
+}
+
+func syncAckSubject() string {
+	return syncSubject("$JSC.ACK") + ".*"
+}
+
+func syncSubject(pre string) string {
+	var sb strings.Builder
+	sb.WriteString(pre)
+	sb.WriteByte(btsep)
+
+	var b [replySuffixLen]byte
+	rn := rand.Int63()
+	for i, l := 0, rn; i < len(b); i++ {
+		b[i] = digits[l%base]
+		l /= base
+	}
+
+	sb.Write(b[:])
+	return sb.String()
 }

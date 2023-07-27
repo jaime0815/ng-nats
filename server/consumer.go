@@ -291,23 +291,10 @@ type consumer struct {
 	lat               time.Time
 	closed            bool
 
-	// Clustered.
-	ca        *consumerAssignment
-	node      RaftNode
-	infoSub   *subscription
-	lqsent    time.Time
-	prm       map[string]struct{}
-	prOk      bool
-	uch       chan struct{}
 	retention RetentionPolicy
 
 	monitorWg sync.WaitGroup
 	inMonitor bool
-
-	// R>1 proposals
-	pch   chan struct{}
-	phead *proposal
-	ptail *proposal
 
 	// Ack queue
 	ackMsgs *ipQueue[*jsAckMsg]
@@ -563,21 +550,14 @@ func checkConsumerCfg(
 }
 
 func (mset *stream) addConsumer(config *ConsumerConfig) (*consumer, error) {
-	return mset.addConsumerWithAssignment(config, _EMPTY_, nil, false)
+	return mset.addConsumerInternal(config, _EMPTY_, false)
 }
 
-func (mset *stream) addConsumerWithAssignment(config *ConsumerConfig, oname string, ca *consumerAssignment, isRecovering bool) (*consumer, error) {
+func (mset *stream) addConsumerInternal(config *ConsumerConfig, oname string, isRecovering bool) (*consumer, error) {
 	mset.mu.RLock()
 	s, jsa, tierName, cfg, acc := mset.srv, mset.jsa, mset.tier, mset.cfg, mset.acc
 	retention := cfg.Retention
 	mset.mu.RUnlock()
-
-	// If we do not have the consumer currently assigned to us in cluster mode we will proceed but warn.
-	// This can happen on startup with restored state where on meta replay we still do not have
-	// the assignment. Running in single server mode this always returns true.
-	if oname != _EMPTY_ && !jsa.consumerAssigned(mset.name(), oname) {
-		s.Debugf("Consumer %q > %q does not seem to be assigned to this server", mset.name(), oname)
-	}
 
 	if config == nil {
 		return nil, NewJSConsumerConfigRequiredError()
@@ -708,7 +688,6 @@ func (mset *stream) addConsumerWithAssignment(config *ConsumerConfig, oname stri
 		outq:      mset.outq,
 		active:    true,
 		qch:       make(chan struct{}),
-		uch:       make(chan struct{}, 1),
 		mch:       make(chan struct{}, 1),
 		sfreq:     int32(sampleFreq),
 		maxdc:     uint64(config.MaxDeliver),
@@ -846,11 +825,6 @@ func (mset *stream) addConsumerWithAssignment(config *ConsumerConfig, oname stri
 		}
 	}
 
-	// Set our ca.
-	if ca != nil {
-		o.setConsumerAssignment(ca)
-	}
-
 	// Check if we have a rate limit set.
 	if config.RateLimit != 0 {
 		o.setRateLimit(config.RateLimit)
@@ -859,24 +833,11 @@ func (mset *stream) addConsumerWithAssignment(config *ConsumerConfig, oname stri
 	mset.setConsumer(o)
 	mset.mu.Unlock()
 
-	if config.Direct || (!s.JetStreamIsClustered() && s.standAloneMode()) {
+	if config.Direct || s.standAloneMode() {
 		o.setLeader(true)
 	}
 
-	// This is always true in single server mode.
-	if o.IsLeader() {
-		// Send advisory.
-		var suppress bool
-		if !s.standAloneMode() && ca == nil {
-			suppress = true
-		} else if ca != nil {
-			suppress = ca.responded
-		}
-		if !suppress {
-			o.sendCreateAdvisory()
-		}
-	}
-
+	o.sendCreateAdvisory()
 	return o, nil
 }
 
@@ -904,36 +865,6 @@ func (o *consumer) updateInactiveThreshold(cfg *ConsumerConfig) {
 	}
 }
 
-func (o *consumer) consumerAssignment() *consumerAssignment {
-	o.mu.RLock()
-	defer o.mu.RUnlock()
-	return o.ca
-}
-
-func (o *consumer) setConsumerAssignment(ca *consumerAssignment) {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-
-	o.ca = ca
-	if ca == nil {
-		return
-	}
-	// Set our node.
-	o.node = ca.Group.node
-
-	// Trigger update chan.
-	select {
-	case o.uch <- struct{}{}:
-	default:
-	}
-}
-
-func (o *consumer) updateC() <-chan struct{} {
-	o.mu.RLock()
-	defer o.mu.RUnlock()
-	return o.uch
-}
-
 // checkQueueInterest will check on our interest's queue group status.
 // Lock should be held.
 func (o *consumer) checkQueueInterest() {
@@ -955,221 +886,120 @@ func (o *consumer) checkQueueInterest() {
 	}
 }
 
-// clears our node if we have one. When we scale down to 1.
-func (o *consumer) clearNode() {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	if o.node != nil {
-		o.node.Delete()
-		o.node = nil
-	}
-}
-
 // IsLeader will return if we are the current leader.
 func (o *consumer) IsLeader() bool {
-	o.mu.RLock()
-	defer o.mu.RUnlock()
-	return o.isLeader()
-}
-
-// Lock should be held.
-func (o *consumer) isLeader() bool {
-	if o.node != nil {
-		return o.node.Leader()
-	}
 	return true
 }
 
 func (o *consumer) setLeader(isLeader bool) {
 	o.mu.RLock()
 	mset := o.mset
-	isRunning := o.ackSub != nil
 	o.mu.RUnlock()
 
-	// If we are here we have a change in leader status.
-	if isLeader {
-		if mset == nil {
-			return
-		}
-		if isRunning {
-			// If we detect we are scaling up, make sure to create clustered routines and channels.
-			o.mu.Lock()
-			if o.node != nil && o.pch == nil {
-				// We are moving from R1 to clustered.
-				o.pch = make(chan struct{}, 1)
-				go o.loopAndForwardProposals(o.qch)
-				if o.phead != nil {
-					select {
-					case o.pch <- struct{}{}:
-					default:
-					}
-				}
-			}
-			o.mu.Unlock()
-			return
-		}
+	if mset == nil {
+		return
+	}
 
-		mset.mu.RLock()
-		s, jsa, stream, lseq := mset.srv, mset.jsa, mset.cfg.Name, mset.lseq
-		mset.mu.RUnlock()
+	mset.mu.RLock()
+	s, stream, lseq := mset.srv, mset.cfg.Name, mset.lseq
+	mset.mu.RUnlock()
 
-		// Register as a leader with our parent stream.
-		mset.setConsumerAsLeader(o)
+	// Register as a leader with our parent stream.
+	mset.setConsumerAsLeader(o)
 
-		o.mu.Lock()
-		o.rdq, o.rdqi = nil, nil
+	o.mu.Lock()
+	o.rdq, o.rdqi = nil, nil
 
-		// Restore our saved state. During non-leader status we just update our underlying store.
-		o.readStoredState(lseq)
+	// Restore our saved state. During non-leader status we just update our underlying store.
+	o.readStoredState(lseq)
 
-		// Setup initial num pending.
-		o.streamNumPending()
+	// Setup initial num pending.
+	o.streamNumPending()
 
-		// Cleanup lss when we take over in clustered mode.
-		if o.hasSkipListPending() && o.sseq >= o.lss.resume {
-			o.lss = nil
-		}
+	// Cleanup lss when we take over in clustered mode.
+	if o.hasSkipListPending() && o.sseq >= o.lss.resume {
+		o.lss = nil
+	}
 
-		// Update the group on the our starting sequence if we are starting but we skipped some in the stream.
-		if o.dseq == 1 && o.sseq > 1 {
-			o.updateSkipped()
-		}
-
-		// Do info sub.
-		if o.infoSub == nil && jsa != nil {
-			isubj := fmt.Sprintf(clusterConsumerInfoT, jsa.acc(), stream, o.name)
-			// Note below the way we subscribe here is so that we can send requests to ourselves.
-			o.infoSub, _ = s.systemSubscribe(isubj, _EMPTY_, false, o.sysc, o.handleClusterConsumerInfoRequest)
-		}
-
-		var err error
-		if o.cfg.AckPolicy != AckNone {
-			if o.ackSub, err = o.subscribeInternal(o.ackSubj, o.pushAck); err != nil {
-				o.mu.Unlock()
-				o.deleteWithoutAdvisory()
-				return
-			}
-		}
-
-		// Setup the internal sub for next message requests regardless.
-		// Will error if wrong mode to provide feedback to users.
-		if o.reqSub, err = o.subscribeInternal(o.nextMsgSubj, o.processNextMsgReq); err != nil {
+	var err error
+	if o.cfg.AckPolicy != AckNone {
+		if o.ackSub, err = o.subscribeInternal(o.ackSubj, o.pushAck); err != nil {
 			o.mu.Unlock()
 			o.deleteWithoutAdvisory()
 			return
 		}
+	}
 
-		// Check on flow control settings.
-		if o.cfg.FlowControl {
-			o.setMaxPendingBytes(JsFlowControlMaxPending)
-			fcsubj := fmt.Sprintf(jsFlowControl, stream, o.name)
-			if o.fcSub, err = o.subscribeInternal(fcsubj, o.processFlowControl); err != nil {
-				o.mu.Unlock()
-				o.deleteWithoutAdvisory()
-				return
-			}
-		}
-
-		// If push mode, register for notifications on interest.
-		if o.isPushMode() {
-			o.inch = make(chan bool, 8)
-			o.acc.sl.registerNotification(o.cfg.DeliverSubject, o.cfg.DeliverGroup, o.inch)
-			if o.active = <-o.inch; o.active {
-				o.checkQueueInterest()
-			}
-
-			// Check gateways in case they are enabled.
-			if s.gateway.enabled {
-				if !o.active {
-					o.active = s.hasGatewayInterest(o.acc.Name, o.cfg.DeliverSubject)
-				}
-				stopAndClearTimer(&o.gwdtmr)
-				o.gwdtmr = time.AfterFunc(time.Second, func() { o.watchGWinterest() })
-			}
-		}
-
-		if o.dthresh > 0 && (o.isPullMode() || !o.active) {
-			// Pull consumer. We run the dtmr all the time for this one.
-			stopAndClearTimer(&o.dtmr)
-			o.dtmr = time.AfterFunc(o.dthresh, func() { o.deleteNotActive() })
-		}
-
-		// If we are not in ReplayInstant mode mark us as in replay state until resolved.
-		if o.cfg.ReplayPolicy != ReplayInstant {
-			o.replay = true
-		}
-
-		// Recreate quit channel.
-		o.qch = make(chan struct{})
-		qch := o.qch
-		node := o.node
-		if node != nil && o.pch == nil {
-			o.pch = make(chan struct{}, 1)
-		}
-		pullMode := o.isPullMode()
+	// Setup the internal sub for next message requests regardless.
+	// Will error if wrong mode to provide feedback to users.
+	if o.reqSub, err = o.subscribeInternal(o.nextMsgSubj, o.processNextMsgReq); err != nil {
 		o.mu.Unlock()
+		o.deleteWithoutAdvisory()
+		return
+	}
 
-		// Snapshot initial info.
-		o.infoWithSnap(true)
-
-		// Now start up Go routine to deliver msgs.
-		go o.loopAndGatherMsgs(qch)
-
-		// Now start up Go routine to process acks.
-		go o.processInboundAcks(qch)
-
-		if pullMode {
-			// Now start up Go routine to process inbound next message requests.
-			go o.processInboundNextMsgReqs(qch)
-
-		}
-
-		// If we are R>1 spin up our proposal loop.
-		if node != nil {
-			// Determine if we can send pending requests info to the group.
-			// They must be on server versions >= 2.7.1
-			o.checkAndSetPendingRequestsOk()
-			o.checkPendingRequests()
-			go o.loopAndForwardProposals(qch)
-		}
-
-	} else {
-		// Shutdown the go routines and the subscriptions.
-		o.mu.Lock()
-		if o.qch != nil {
-			close(o.qch)
-			o.qch = nil
-		}
-		// Make sure to clear out any re delivery queues
-		stopAndClearTimer(&o.ptmr)
-		o.rdq, o.rdqi = nil, nil
-		o.pending = nil
-		// ok if they are nil, we protect inside unsubscribe()
-		o.unsubscribe(o.ackSub)
-		o.unsubscribe(o.reqSub)
-		o.unsubscribe(o.fcSub)
-		o.ackSub, o.reqSub, o.fcSub = nil, nil, nil
-		if o.infoSub != nil {
-			o.srv.sysUnsubscribe(o.infoSub)
-			o.infoSub = nil
-		}
-		// Reset waiting if we are in pull mode.
-		if o.isPullMode() {
-			o.waiting = newWaitQueue(o.cfg.MaxWaiting)
-			if !o.isDurable() {
-				stopAndClearTimer(&o.dtmr)
-			}
-			o.nextMsgReqs.drain()
-		} else if o.srv.gateway.enabled {
-			stopAndClearTimer(&o.gwdtmr)
-		}
-		o.mu.Unlock()
-
-		// Unregister as a leader with our parent stream.
-		if mset != nil {
-			mset.removeConsumerAsLeader(o)
+	// Check on flow control settings.
+	if o.cfg.FlowControl {
+		o.setMaxPendingBytes(JsFlowControlMaxPending)
+		fcsubj := fmt.Sprintf(jsFlowControl, stream, o.name)
+		if o.fcSub, err = o.subscribeInternal(fcsubj, o.processFlowControl); err != nil {
+			o.mu.Unlock()
+			o.deleteWithoutAdvisory()
+			return
 		}
 	}
+
+	// If push mode, register for notifications on interest.
+	if o.isPushMode() {
+		o.inch = make(chan bool, 8)
+		o.acc.sl.registerNotification(o.cfg.DeliverSubject, o.cfg.DeliverGroup, o.inch)
+		if o.active = <-o.inch; o.active {
+			o.checkQueueInterest()
+		}
+
+		// Check gateways in case they are enabled.
+		if s.gateway.enabled {
+			if !o.active {
+				o.active = s.hasGatewayInterest(o.acc.Name, o.cfg.DeliverSubject)
+			}
+			stopAndClearTimer(&o.gwdtmr)
+			o.gwdtmr = time.AfterFunc(time.Second, func() { o.watchGWinterest() })
+		}
+	}
+
+	if o.dthresh > 0 && (o.isPullMode() || !o.active) {
+		// Pull consumer. We run the dtmr all the time for this one.
+		stopAndClearTimer(&o.dtmr)
+		o.dtmr = time.AfterFunc(o.dthresh, func() { o.deleteNotActive() })
+	}
+
+	// If we are not in ReplayInstant mode mark us as in replay state until resolved.
+	if o.cfg.ReplayPolicy != ReplayInstant {
+		o.replay = true
+	}
+
+	// Recreate quit channel.
+	o.qch = make(chan struct{})
+	qch := o.qch
+
+	pullMode := o.isPullMode()
+	o.mu.Unlock()
+
+	// Snapshot initial info.
+	o.infoWithSnap(true)
+
+	// Now start up Go routine to deliver msgs.
+	go o.loopAndGatherMsgs(qch)
+
+	// Now start up Go routine to process acks.
+	go o.processInboundAcks(qch)
+
+	if pullMode {
+		// Now start up Go routine to process inbound next message requests.
+		go o.processInboundNextMsgReqs(qch)
+
+	}
+
 }
 
 // This is coming on the wire so do not block here.
@@ -1393,43 +1223,7 @@ func (o *consumer) deleteNotActive() {
 		}
 	}
 
-	s, js := o.mset.srv, o.mset.srv.js
-	acc, stream, name, isDirect := o.acc.Name, o.stream, o.name, o.cfg.Direct
 	o.mu.Unlock()
-
-	// If we are clustered, check if we still have this consumer assigned.
-	// If we do forward a proposal to delete ourselves to the metacontroller leader.
-	if !isDirect && s.JetStreamIsClustered() {
-		js.mu.RLock()
-		ca, cc := js.consumerAssignment(acc, stream, name), js.cluster
-		js.mu.RUnlock()
-
-		if ca != nil && cc != nil {
-			cca := *ca
-			cca.Reply = _EMPTY_
-			meta, removeEntry := cc.meta, encodeDeleteConsumerAssignment(&cca)
-			meta.ForwardProposal(removeEntry)
-
-			// Check to make sure we went away.
-			// Don't think this needs to be a monitored go routine.
-			go func() {
-				ticker := time.NewTicker(10 * time.Second)
-				defer ticker.Stop()
-				for range ticker.C {
-					js.mu.RLock()
-					nca := js.consumerAssignment(acc, stream, name)
-					js.mu.RUnlock()
-					// Make sure this is not a new consumer with the same name.
-					if nca != nil && nca == ca {
-						s.Warnf("Consumer assignment for '%s > %s > %s' not cleaned up, retrying", acc, stream, name)
-						meta.ForwardProposal(removeEntry)
-					} else {
-						return
-					}
-				}
-			}()
-		}
-	}
 
 	// We will delete here regardless.
 	o.delete()
@@ -1639,7 +1433,7 @@ func (o *consumer) updateConfig(cfg *ConsumerConfig) error {
 		o.updateInactiveThreshold(cfg)
 		stopAndClearTimer(&o.dtmr)
 		// Restart timer only if we are the leader.
-		if o.isLeader() && o.dthresh > 0 {
+		if o.dthresh > 0 {
 			o.dtmr = time.AfterFunc(o.dthresh, func() { o.deleteNotActive() })
 		}
 	}
@@ -1796,101 +1590,7 @@ func (o *consumer) progressUpdate(seq uint64) {
 }
 
 // Lock should be held.
-func (o *consumer) updateSkipped() {
-	// Clustered mode and R>1 only.
-	if o.node == nil || !o.isLeader() {
-		return
-	}
-	var b [1 + 8]byte
-	b[0] = byte(updateSkipOp)
-	var le = binary.LittleEndian
-	le.PutUint64(b[1:], o.sseq)
-	o.propose(b[:])
-}
-
-func (o *consumer) loopAndForwardProposals(qch chan struct{}) {
-	o.mu.RLock()
-	node, pch := o.node, o.pch
-	o.mu.RUnlock()
-
-	if node == nil || pch == nil {
-		return
-	}
-
-	forwardProposals := func() {
-		o.mu.Lock()
-		proposal := o.phead
-		o.phead, o.ptail = nil, nil
-		o.mu.Unlock()
-		// 256k max for now per batch.
-		const maxBatch = 256 * 1024
-		var entries []*Entry
-		for sz := 0; proposal != nil; proposal = proposal.next {
-			entry := entryPool.Get().(*Entry)
-			entry.Type, entry.Data = EntryNormal, proposal.data
-			entries = append(entries, entry)
-			sz += len(proposal.data)
-			if sz > maxBatch {
-				node.ProposeDirect(entries)
-				// We need to re-create `entries` because there is a reference
-				// to it in the node's pae map.
-				sz, entries = 0, nil
-			}
-		}
-		if len(entries) > 0 {
-			node.ProposeDirect(entries)
-		}
-	}
-
-	// In case we have anything pending on entry.
-	forwardProposals()
-
-	for {
-		select {
-		case <-qch:
-			forwardProposals()
-			return
-		case <-pch:
-			forwardProposals()
-		}
-	}
-}
-
-// Lock should be held.
-func (o *consumer) propose(entry []byte) {
-	var notify bool
-	p := &proposal{data: entry}
-	if o.phead == nil {
-		o.phead = p
-		notify = true
-	} else {
-		o.ptail.next = p
-	}
-	o.ptail = p
-
-	// Kick our looper routine if needed.
-	if notify {
-		select {
-		case o.pch <- struct{}{}:
-		default:
-		}
-	}
-}
-
-// Lock should be held.
 func (o *consumer) updateDelivered(dseq, sseq, dc uint64, ts int64) {
-	// Clustered mode and R>1.
-	if o.node != nil {
-		// Inline for now, use variable compression.
-		var b [4*binary.MaxVarintLen64 + 1]byte
-		b[0] = byte(updateDeliveredOp)
-		n := 1
-		n += binary.PutUvarint(b[n:], dseq)
-		n += binary.PutUvarint(b[n:], sseq)
-		n += binary.PutUvarint(b[n:], dc)
-		n += binary.PutVarint(b[n:], ts)
-		o.propose(b[:n])
-	}
 	if o.store != nil {
 		// Update local state always.
 		o.store.UpdateDelivered(dseq, sseq, dc, ts)
@@ -1901,95 +1601,9 @@ func (o *consumer) updateDelivered(dseq, sseq, dc uint64, ts int64) {
 
 // Lock should be held.
 func (o *consumer) updateAcks(dseq, sseq uint64) {
-	if o.node != nil {
-		// Inline for now, use variable compression.
-		var b [2*binary.MaxVarintLen64 + 1]byte
-		b[0] = byte(updateAcksOp)
-		n := 1
-		n += binary.PutUvarint(b[n:], dseq)
-		n += binary.PutUvarint(b[n:], sseq)
-		o.propose(b[:n])
-	} else if o.store != nil {
-		o.store.UpdateAcks(dseq, sseq)
-	}
+	o.store.UpdateAcks(dseq, sseq)
 	// Update activity.
 	o.lat = time.Now()
-}
-
-// Communicate to the cluster an addition of a pending request.
-// Lock should be held.
-func (o *consumer) addClusterPendingRequest(reply string) {
-	if o.node == nil || !o.pendingRequestsOk() {
-		return
-	}
-	b := make([]byte, len(reply)+1)
-	b[0] = byte(addPendingRequest)
-	copy(b[1:], reply)
-	o.propose(b)
-}
-
-// Communicate to the cluster a removal of a pending request.
-// Lock should be held.
-func (o *consumer) removeClusterPendingRequest(reply string) {
-	if o.node == nil || !o.pendingRequestsOk() {
-		return
-	}
-	b := make([]byte, len(reply)+1)
-	b[0] = byte(removePendingRequest)
-	copy(b[1:], reply)
-	o.propose(b)
-}
-
-// Set whether or not we can send pending requests to followers.
-func (o *consumer) setPendingRequestsOk(ok bool) {
-	o.mu.Lock()
-	o.prOk = ok
-	o.mu.Unlock()
-}
-
-// Lock should be held.
-func (o *consumer) pendingRequestsOk() bool {
-	return o.prOk
-}
-
-// Set whether or not we can send info about pending pull requests to our group.
-// Will require all peers have a minimum version.
-func (o *consumer) checkAndSetPendingRequestsOk() {
-	o.mu.RLock()
-	s, isValid := o.srv, o.mset != nil
-	o.mu.RUnlock()
-	if !isValid {
-		return
-	}
-
-	if ca := o.consumerAssignment(); ca != nil && len(ca.Group.Peers) > 1 {
-		for _, pn := range ca.Group.Peers {
-			if si, ok := s.nodeToInfo.Load(pn); ok {
-				if !versionAtLeast(si.(nodeInfo).version, 2, 7, 1) {
-					// We expect all of our peers to eventually be up to date.
-					// So check again in awhile.
-					time.AfterFunc(eventsHBInterval, func() { o.checkAndSetPendingRequestsOk() })
-					o.setPendingRequestsOk(false)
-					return
-				}
-			}
-		}
-	}
-	o.setPendingRequestsOk(true)
-}
-
-// On leadership change make sure we alert the pending requests that they are no longer valid.
-func (o *consumer) checkPendingRequests() {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	if o.mset == nil || o.outq == nil {
-		return
-	}
-	hdr := []byte("NATS/1.0 409 Leadership Change\r\n\r\n")
-	for reply := range o.prm {
-		o.outq.send(newJSPubMsg(reply, _EMPTY_, _EMPTY_, hdr, nil, nil, 0))
-	}
-	o.prm = nil
 }
 
 // This will release any pending pull requests if applicable.
@@ -2292,12 +1906,6 @@ func (o *consumer) infoWithSnapAndReply(snap bool, reply string) *ConsumerInfo {
 		return nil
 	}
 
-	// Capture raftGroup.
-	var rg *raftGroup
-	if o.ca != nil {
-		rg = o.ca.Group
-	}
-
 	cfg := o.cfg
 	info := &ConsumerInfo{
 		Stream:  o.stream,
@@ -2316,15 +1924,6 @@ func (o *consumer) infoWithSnapAndReply(snap bool, reply string) *ConsumerInfo {
 		NumRedelivered: len(o.rdc),
 		NumPending:     o.checkNumPending(),
 		PushBound:      o.isPushMode() && o.active,
-	}
-
-	// If we are replicated and we are not the leader we need to pull certain data from our store.
-	if rg != nil && rg.node != nil && !o.isLeader() && o.store != nil {
-		state, _ := o.store.BorrowState()
-		info.Delivered.Consumer, info.Delivered.Stream = state.Delivered.Consumer, state.Delivered.Stream
-		info.AckFloor.Consumer, info.AckFloor.Stream = state.AckFloor.Consumer, state.AckFloor.Stream
-		info.NumAckPending = len(state.Pending)
-		info.NumRedelivered = len(state.Redelivered)
 	}
 
 	// Adjust active based on non-zero etc. Also make UTC here.
@@ -2348,11 +1947,6 @@ func (o *consumer) infoWithSnapAndReply(snap bool, reply string) *ConsumerInfo {
 	}
 	sysc := o.sysc
 	o.mu.Unlock()
-
-	// Do cluster.
-	if rg != nil {
-		info.Cluster = js.clusterInfo(rg)
-	}
 
 	// If we have a reply subject send the response here.
 	if reply != _EMPTY_ && sysc != nil {
@@ -2481,13 +2075,12 @@ func (o *consumer) processAckMsg(sseq, dseq, dc uint64, doSample bool) {
 	o.updateAcks(dseq, sseq)
 
 	mset := o.mset
-	clustered := o.node != nil
 	o.mu.Unlock()
 
 	// Let the owning stream know if we are interest or workqueue retention based.
 	// If this consumer is clustered this will be handled by processReplicatedAck
 	// after the ack has propagated.
-	if !clustered && mset != nil && mset.cfg.Retention != LimitsPolicy {
+	if mset != nil && mset.cfg.Retention != LimitsPolicy {
 		if sagap > 1 {
 			// FIXME(dlc) - This is very inefficient, will need to fix.
 			for seq := sseq; seq > sseq-sagap; seq-- {
@@ -2553,21 +2146,8 @@ func (o *consumer) needAck(sseq uint64, subj string) bool {
 		}
 	}
 
-	if o.isLeader() {
-		asflr, osseq = o.asflr, o.sseq
-		pending = o.pending
-	} else {
-		if o.store == nil {
-			return false
-		}
-		state, err := o.store.BorrowState()
-		if err != nil || state == nil {
-			// Fall back to what we track internally for now.
-			return sseq > o.asflr && !o.isFiltered()
-		}
-		// If loading state as here, the osseq is +1.
-		asflr, osseq, pending = state.AckFloor.Stream, state.Delivered.Stream+1, state.Pending
-	}
+	asflr, osseq = o.asflr, o.sseq
+	pending = o.pending
 
 	switch o.cfg.AckPolicy {
 	case AckNone, AckAll:
@@ -2817,9 +2397,6 @@ func (o *consumer) nextWaiting(sz int) *waitingRequest {
 				o.outq.send(newJSPubMsg(wr.reply, _EMPTY_, _EMPTY_, hdr, nil, nil, 0))
 				// Remove the current one, no longer valid due to max bytes limit.
 				o.waiting.removeCurrent()
-				if o.node != nil {
-					o.removeClusterPendingRequest(wr.reply)
-				}
 				wr.recycle()
 				continue
 			}
@@ -2839,9 +2416,6 @@ func (o *consumer) nextWaiting(sz int) *waitingRequest {
 			hdr := []byte(fmt.Sprintf("NATS/1.0 408 Request Timeout\r\n%s: %d\r\n%s: %d\r\n\r\n", JSPullRequestPendingMsgs, wr.n, JSPullRequestPendingBytes, wr.b))
 			o.outq.send(newJSPubMsg(wr.reply, _EMPTY_, _EMPTY_, hdr, nil, nil, 0))
 			o.waiting.removeCurrent()
-			if o.node != nil {
-				o.removeClusterPendingRequest(wr.reply)
-			}
 			wr.recycle()
 			continue
 
@@ -2853,9 +2427,6 @@ func (o *consumer) nextWaiting(sz int) *waitingRequest {
 		}
 		// Remove the current one, no longer valid.
 		o.waiting.removeCurrent()
-		if o.node != nil {
-			o.removeClusterPendingRequest(wr.reply)
-		}
 		wr.recycle()
 	}
 	return nil
@@ -2995,10 +2566,6 @@ func (o *consumer) processNextMsgRequest(reply string, msg []byte) {
 		return
 	}
 	o.signalNewMessages()
-	// If we are clustered update our followers about this request.
-	if o.node != nil {
-		o.addClusterPendingRequest(wr.reply)
-	}
 }
 
 func trackDownAccountAndInterest(acc *Account, interest string) (*Account, string) {
@@ -3116,7 +2683,6 @@ func (o *consumer) getNextMsg() (*jsPubMsg, uint64, error) {
 		if len(o.lss.seqs) == 1 {
 			o.sseq = o.lss.resume
 			o.lss = nil
-			o.updateSkipped()
 		} else {
 			o.lss.seqs = o.lss.seqs[1:]
 		}
@@ -3145,9 +2711,6 @@ func (o *consumer) getNextMsg() (*jsPubMsg, uint64, error) {
 
 	if sseq >= o.sseq {
 		o.sseq = sseq + 1
-		if err == ErrStoreEOF {
-			o.updateSkipped()
-		}
 	}
 
 	return pmsg, dc, err
@@ -3172,9 +2735,6 @@ func (o *consumer) processWaiting(eos bool) (int, int, int, time.Time) {
 		} else {
 			o.waiting.reqs[i] = nil
 			hid = true
-		}
-		if o.node != nil {
-			o.removeClusterPendingRequest(wr.reply)
 		}
 		expired++
 		wr.recycle()
@@ -3534,9 +3094,8 @@ func (o *consumer) loopAndGatherMsgs(qch chan struct{}) {
 			dsubj = o.dsubj
 		} else if wr := o.nextWaiting(sz); wr != nil {
 			dsubj = wr.reply
-			if done := wr.recycleIfDone(); done && o.node != nil {
-				o.removeClusterPendingRequest(dsubj)
-			} else if !done && wr.hb > 0 {
+			done := wr.recycleIfDone()
+			if !done && wr.hb > 0 {
 				wr.hbt = time.Now().Add(wr.hb)
 			}
 		} else {
@@ -3806,11 +3365,7 @@ func (o *consumer) deliverMsg(dsubj, ackReply string, pmsg *jsPubMsg, dc uint64,
 
 	// If we are ack none and mset is interest only we should make sure stream removes interest.
 	if ap == AckNone && rp != LimitsPolicy {
-		if o.node == nil || o.cfg.Direct {
-			mset.ackq.push(seq)
-		} else {
-			o.updateAcks(dseq, seq)
-		}
+		mset.ackq.push(seq)
 	}
 }
 
@@ -4350,10 +3905,6 @@ func (o *consumer) hasNoLocalInterest() bool {
 // sseq is the new first seq for the stream after purge.
 // Lock should be held.
 func (o *consumer) purge(sseq uint64, slseq uint64) {
-	// Do not update our state unless we know we are the leader.
-	if !o.isLeader() {
-		return
-	}
 	// Signals all have been purged for this consumer.
 	if sseq == 0 {
 		sseq = slseq + 1
@@ -4440,8 +3991,6 @@ func (o *consumer) isClosed() bool {
 
 func (o *consumer) stopWithFlags(dflag, sdflag, doSignal, advisory bool) error {
 	o.mu.Lock()
-	js := o.js
-
 	if o.closed {
 		o.mu.Unlock()
 		return nil
@@ -4449,11 +3998,7 @@ func (o *consumer) stopWithFlags(dflag, sdflag, doSignal, advisory bool) error {
 	o.closed = true
 
 	// Check if we are the leader and are being deleted.
-	if dflag && o.isLeader() {
-		// If we are clustered and node leader (probable from above), stepdown.
-		if node := o.node; node != nil && node.Leader() {
-			node.StepDown()
-		}
+	if dflag {
 		if advisory {
 			o.sendDeleteAdvisoryLocked()
 		}
@@ -4479,10 +4024,7 @@ func (o *consumer) stopWithFlags(dflag, sdflag, doSignal, advisory bool) error {
 	o.ackSub = nil
 	o.reqSub = nil
 	o.fcSub = nil
-	if o.infoSub != nil {
-		o.srv.sysUnsubscribe(o.infoSub)
-		o.infoSub = nil
-	}
+
 	c := o.client
 	o.client = nil
 	sysc := o.sysc
@@ -4496,18 +4038,12 @@ func (o *consumer) stopWithFlags(dflag, sdflag, doSignal, advisory bool) error {
 	if doSignal {
 		o.signalNewMessages()
 	}
-	n := o.node
 	qgroup := o.cfg.DeliverGroup
 	o.ackMsgs.unregister()
 	if o.nextMsgReqs != nil {
 		o.nextMsgReqs.unregister()
 	}
 
-	// For cleaning up the node assignment.
-	var ca *consumerAssignment
-	if dflag {
-		ca = o.ca
-	}
 	sigSub := o.sigSub
 	o.mu.Unlock()
 
@@ -4540,9 +4076,6 @@ func (o *consumer) stopWithFlags(dflag, sdflag, doSignal, advisory bool) error {
 		state := mset.state()
 		stop := state.LastSeq
 		o.mu.Lock()
-		if !o.isLeader() {
-			o.readStoredState(stop)
-		}
 		start := o.asflr
 		o.mu.Unlock()
 		// Make sure we start at worst with first sequence in the stream.
@@ -4563,29 +4096,6 @@ func (o *consumer) stopWithFlags(dflag, sdflag, doSignal, advisory bool) error {
 		for _, seq := range rmseqs {
 			mset.store.RemoveMsg(seq)
 		}
-	}
-
-	// Cluster cleanup.
-	if n != nil {
-		if dflag {
-			n.Delete()
-		} else {
-			// Try to install snapshot on clean exit
-			if o.store != nil && (o.retention != LimitsPolicy || n.NeedSnapshot()) {
-				if snap, err := o.store.EncodedState(); err == nil {
-					n.InstallSnapshot(snap)
-				}
-			}
-			n.Stop()
-		}
-	}
-
-	if ca != nil {
-		js.mu.Lock()
-		if ca.Group != nil {
-			ca.Group.node = nil
-		}
-		js.mu.Unlock()
 	}
 
 	// Clean up our store.

@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"github.com/nats-io/jwt/v2"
+
 	"github.com/nats-io/nats-server/v2/server/pse"
 )
 
@@ -1208,7 +1209,6 @@ type Varz struct {
 type JetStreamVarz struct {
 	Config *JetStreamConfig `json:"config,omitempty"`
 	Stats  *JetStreamStats  `json:"stats,omitempty"`
-	Meta   *MetaClusterInfo `json:"meta,omitempty"`
 }
 
 // ClusterOptsVarz contains monitoring cluster information
@@ -1406,14 +1406,6 @@ func (s *Server) updateJszVarz(js *jetStream, v *JetStreamVarz, doConfig bool) {
 		js.mu.RUnlock()
 	}
 	v.Stats = js.usageStats()
-	if mg := js.getMetaGroup(); mg != nil {
-		if ci := s.raftNodeToClusterInfo(mg); ci != nil {
-			v.Meta = &MetaClusterInfo{Name: ci.Name, Leader: ci.Leader, Peer: getHash(ci.Leader), Size: mg.ClusterSize()}
-			if ci.Leader == s.info.Name {
-				v.Meta.Replicas = ci.Replicas
-			}
-		}
-	}
 }
 
 // Varz returns a Varz struct containing the server information.
@@ -1746,7 +1738,6 @@ func (s *Server) HandleVarz(w http.ResponseWriter, r *http.Request) {
 			sv.Config = v.Config
 		}
 		sv.Stats = v.Stats
-		sv.Meta = v.Meta
 		s.mu.Unlock()
 	}
 
@@ -2652,22 +2643,13 @@ type HealthzOptions struct {
 
 // StreamDetail shows information about the stream state and its consumers.
 type StreamDetail struct {
-	Name               string              `json:"name"`
-	Created            time.Time           `json:"created"`
-	Cluster            *ClusterInfo        `json:"cluster,omitempty"`
-	Config             *StreamConfig       `json:"config,omitempty"`
-	State              StreamState         `json:"state,omitempty"`
-	Consumer           []*ConsumerInfo     `json:"consumer_detail,omitempty"`
-	Mirror             *StreamSourceInfo   `json:"mirror,omitempty"`
-	Sources            []*StreamSourceInfo `json:"sources,omitempty"`
-	RaftGroup          string              `json:"stream_raft_group,omitempty"`
-	ConsumerRaftGroups []*RaftGroupDetail  `json:"consumer_raft_groups,omitempty"`
-}
-
-// RaftGroupDetail shows information details about the Raft group.
-type RaftGroupDetail struct {
-	Name      string `json:"name"`
-	RaftGroup string `json:"raft_group,omitempty"`
+	Name     string              `json:"name"`
+	Created  time.Time           `json:"created"`
+	Config   *StreamConfig       `json:"config,omitempty"`
+	State    StreamState         `json:"state,omitempty"`
+	Consumer []*ConsumerInfo     `json:"consumer_detail,omitempty"`
+	Mirror   *StreamSourceInfo   `json:"mirror,omitempty"`
+	Sources  []*StreamSourceInfo `json:"sources,omitempty"`
 }
 
 type AccountDetail struct {
@@ -2677,15 +2659,6 @@ type AccountDetail struct {
 	Streams []StreamDetail `json:"stream_detail,omitempty"`
 }
 
-// MetaClusterInfo shows information about the meta group.
-type MetaClusterInfo struct {
-	Name     string      `json:"name,omitempty"`
-	Leader   string      `json:"leader,omitempty"`
-	Peer     string      `json:"peer,omitempty"`
-	Replicas []*PeerInfo `json:"replicas,omitempty"`
-	Size     int         `json:"cluster_size"`
-}
-
 // JSInfo has detailed information on JetStream.
 type JSInfo struct {
 	ID       string          `json:"server_id"`
@@ -2693,11 +2666,10 @@ type JSInfo struct {
 	Disabled bool            `json:"disabled,omitempty"`
 	Config   JetStreamConfig `json:"config,omitempty"`
 	JetStreamStats
-	Streams   int              `json:"streams"`
-	Consumers int              `json:"consumers"`
-	Messages  uint64           `json:"messages"`
-	Bytes     uint64           `json:"bytes"`
-	Meta      *MetaClusterInfo `json:"meta_cluster,omitempty"`
+	Streams   int    `json:"streams"`
+	Consumers int    `json:"consumers"`
+	Messages  uint64 `json:"messages"`
+	Bytes     uint64 `json:"bytes"`
 
 	// aggregate raft info
 	AccountDetails []*AccountDetail `json:"account_details,omitempty"`
@@ -2742,8 +2714,6 @@ func (s *Server) accountDetail(jsa *jsAccount, optStreams, optConsumers, optCfg,
 
 	if optStreams {
 		for _, stream := range streams {
-			rgroup := stream.raftGroup()
-			ci := s.js.clusterInfo(rgroup)
 			var cfg *StreamConfig
 			if optCfg {
 				c := stream.config()
@@ -2753,15 +2723,11 @@ func (s *Server) accountDetail(jsa *jsAccount, optStreams, optConsumers, optCfg,
 				Name:    stream.name(),
 				Created: stream.createdTime(),
 				State:   stream.state(),
-				Cluster: ci,
 				Config:  cfg,
 				Mirror:  stream.mirrorInfo(),
 				Sources: stream.sourcesInfo(),
 			}
-			if optRaft && rgroup != nil {
-				sdet.RaftGroup = rgroup.Name
-				sdet.ConsumerRaftGroups = make([]*RaftGroupDetail, 0)
-			}
+
 			if optConsumers {
 				for _, consumer := range stream.getPublicConsumers() {
 					cInfo := consumer.info()
@@ -2772,14 +2738,6 @@ func (s *Server) accountDetail(jsa *jsAccount, optStreams, optConsumers, optCfg,
 						cInfo.Config = nil
 					}
 					sdet.Consumer = append(sdet.Consumer, cInfo)
-					if optRaft {
-						crgroup := consumer.raftGroup()
-						if crgroup != nil {
-							sdet.ConsumerRaftGroups = append(sdet.ConsumerRaftGroups,
-								&RaftGroupDetail{cInfo.Name, crgroup.Name},
-							)
-						}
-					}
 				}
 			}
 			detail.Streams = append(detail.Streams, sdet)
@@ -2804,24 +2762,6 @@ func (s *Server) JszAccount(opts *JSzOptions) (*AccountDetail, error) {
 		return nil, fmt.Errorf("account %q not jetstream enabled", acc)
 	}
 	return s.accountDetail(jsa, opts.Streams, opts.Consumer, opts.Config, opts.RaftGroups), nil
-}
-
-// helper to get cluster info from node via dummy group
-func (s *Server) raftNodeToClusterInfo(node RaftNode) *ClusterInfo {
-	if node == nil {
-		return nil
-	}
-	peers := node.Peers()
-	peerList := make([]string, len(peers))
-	for i, p := range peers {
-		peerList[i] = p.ID
-	}
-	group := &raftGroup{
-		Name:  _EMPTY_,
-		Peers: peerList,
-		node:  node,
-	}
-	return s.js.clusterInfo(group)
 }
 
 // Jsz returns a Jsz structure containing information about JetStream.
@@ -2855,14 +2795,6 @@ func (s *Server) Jsz(opts *JSzOptions) (*JSInfo, error) {
 		return jsi, nil
 	}
 
-	js.mu.RLock()
-	isLeader := js.cluster == nil || js.cluster.isLeader()
-	js.mu.RUnlock()
-
-	if opts.LeaderOnly && !isLeader {
-		return nil, fmt.Errorf("%w: not leader", errSkipZreq)
-	}
-
 	var accounts []*jsAccount
 
 	js.mu.RLock()
@@ -2871,15 +2803,6 @@ func (s *Server) Jsz(opts *JSzOptions) (*JSInfo, error) {
 		accounts = append(accounts, info)
 	}
 	js.mu.RUnlock()
-
-	if mg := js.getMetaGroup(); mg != nil {
-		if ci := s.raftNodeToClusterInfo(mg); ci != nil {
-			jsi.Meta = &MetaClusterInfo{Name: ci.Name, Leader: ci.Leader, Peer: getHash(ci.Leader), Size: mg.ClusterSize()}
-			if isLeader {
-				jsi.Meta.Replicas = ci.Replicas
-			}
-		}
-	}
 
 	jsi.JetStreamStats = *js.usageStats()
 
@@ -3078,119 +3001,32 @@ func (s *Server) healthz(opts *HealthzOptions) *HealthStatus {
 		return health
 	}
 
-	// Clustered JetStream
-	js.mu.RLock()
-	cc := js.cluster
-	js.mu.RUnlock()
-
 	const na = "unavailable"
 
 	// Currently single server we make sure the streams were recovered.
-	if cc == nil {
-		sdir := js.config.StoreDir
-		// Whip through account folders and pull each stream name.
-		fis, _ := os.ReadDir(sdir)
-		for _, fi := range fis {
-			if fi.Name() == snapStagingDir {
-				continue
-			}
-			acc, err := s.LookupAccount(fi.Name())
-			if err != nil {
-				health.Status = na
-				health.Error = fmt.Sprintf("JetStream account '%s' could not be resolved", fi.Name())
-				return health
-			}
-			sfis, _ := os.ReadDir(filepath.Join(sdir, fi.Name(), "streams"))
-			for _, sfi := range sfis {
-				stream := sfi.Name()
-				if _, err := acc.lookupStream(stream); err != nil {
-					health.Status = na
-					health.Error = fmt.Sprintf("JetStream stream '%s > %s' could not be recovered", acc, stream)
-					return health
-				}
-			}
+	sdir := js.config.StoreDir
+	// Whip through account folders and pull each stream name.
+	fis, _ := os.ReadDir(sdir)
+	for _, fi := range fis {
+		if fi.Name() == snapStagingDir {
+			continue
 		}
-		return health
-	}
-
-	// If we are here we want to check for any assets assigned to us.
-	var meta RaftNode
-	js.mu.RLock()
-	meta = cc.meta
-	js.mu.RUnlock()
-
-	// If no meta leader.
-	if meta == nil || meta.GroupLeader() == _EMPTY_ {
-		health.Status = na
-		health.Error = "JetStream has not established contact with a meta leader"
-		return health
-	}
-	// If we are not current with the meta leader.
-	if !meta.Healthy() {
-		health.Status = na
-		health.Error = "JetStream is not current with the meta leader"
-		return health
-	}
-
-	// If JSServerOnly is true, then do not check further accounts, streams and consumers.
-	if opts.JSServerOnly {
-		return health
-	}
-
-	// Range across all accounts, the streams assigned to them, and the consumers.
-	// If they are assigned to this server check their status.
-	ourID := meta.ID()
-
-	// Copy the meta layer so we do not need to hold the js read lock for an extended period of time.
-	js.mu.RLock()
-	streams := make(map[string]map[string]*streamAssignment, len(cc.streams))
-	for acc, asa := range cc.streams {
-		nasa := make(map[string]*streamAssignment)
-		for stream, sa := range asa {
-			// If we are a member and we are not being restored, select for check.
-			if sa.Group.isMember(ourID) && sa.Restore == nil {
-				csa := sa.copyGroup()
-				csa.consumers = make(map[string]*consumerAssignment)
-				for consumer, ca := range sa.consumers {
-					if ca.Group.isMember(ourID) {
-						// Use original here. Not a copy.
-						csa.consumers[consumer] = ca
-					}
-				}
-				nasa[stream] = csa
-			}
-		}
-		streams[acc] = nasa
-	}
-	js.mu.RUnlock()
-
-	// Use our copy to traverse so we do not need to hold the js lock.
-	for accName, asa := range streams {
-		acc, err := s.LookupAccount(accName)
-		if err != nil && len(asa) > 0 {
+		acc, err := s.LookupAccount(fi.Name())
+		if err != nil {
 			health.Status = na
-			health.Error = fmt.Sprintf("JetStream can not lookup account %q: %v", accName, err)
+			health.Error = fmt.Sprintf("JetStream account '%s' could not be resolved", fi.Name())
 			return health
 		}
-
-		for stream, sa := range asa {
-			// Make sure we can look up
-			if !js.isStreamHealthy(acc, sa) {
+		sfis, _ := os.ReadDir(filepath.Join(sdir, fi.Name(), "streams"))
+		for _, sfi := range sfis {
+			stream := sfi.Name()
+			if _, err := acc.lookupStream(stream); err != nil {
 				health.Status = na
-				health.Error = fmt.Sprintf("JetStream stream '%s > %s' is not current", accName, stream)
+				health.Error = fmt.Sprintf("JetStream stream '%s > %s' could not be recovered", acc, stream)
 				return health
-			}
-			mset, _ := acc.lookupStream(stream)
-			// Now check consumers.
-			for consumer, ca := range sa.consumers {
-				if !js.isConsumerHealthy(mset, consumer, ca) {
-					health.Status = na
-					health.Error = fmt.Sprintf("JetStream consumer '%s > %s > %s' is not current", acc, stream, consumer)
-					return health
-				}
 			}
 		}
 	}
-	// Success.
+
 	return health
 }

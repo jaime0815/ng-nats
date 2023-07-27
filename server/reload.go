@@ -148,7 +148,6 @@ type debugOption struct {
 // However we will kick the raft nodes if they exist to reload.
 func (d *debugOption) Apply(server *Server) {
 	server.Noticef("Reloaded: debug = %v", d.newValue)
-	server.reloadDebugRaftNodes(d.newValue)
 }
 
 // logtimeOption implements the option interface for the `logtime` setting.

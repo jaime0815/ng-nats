@@ -259,8 +259,6 @@ func BenchmarkJetStreamConsume(b *testing.B) {
 	}{
 		{1, 1, 10, 100_000}, // Single node, 10B messages, ~1MiB minimum
 		{1, 1, 1024, 1_000}, // Single node, 1KB messages, ~1MiB minimum
-		{3, 3, 10, 100_000}, // Cluster, R3, 10B messages, ~1MiB minimum
-		{3, 3, 1024, 1_000}, // Cluster, R3, 1KB messages, ~1MiB minimum
 	}
 
 	//Each of the cases above is run with each of the consumer types
@@ -313,11 +311,7 @@ func BenchmarkJetStreamConsume(b *testing.B) {
 								defer s.Shutdown()
 								connectURL = s.ClientURL()
 							} else {
-								cl := createJetStreamClusterExplicit(b, "BENCH_PUB", bc.clusterSize)
-								defer cl.shutdown()
-								cl.waitOnClusterReadyWithNumPeers(bc.clusterSize)
-								cl.waitOnLeader()
-								connectURL = cl.randomServer().ClientURL()
+								panic("cluster size should be 1")
 							}
 
 							nc, js := jsClientConnectURL(b, connectURL)
@@ -521,8 +515,6 @@ func BenchmarkJetStreamPublish(b *testing.B) {
 	}{
 		{1, 1, 10, 1, 100_000}, // Single node, 10B messages, ~1MB minimum
 		{1, 1, 1024, 1, 1_000}, // Single node, 1KB messages, ~1MB minimum
-		{3, 3, 10, 1, 100_000}, // 3-nodes cluster, R=3, 10B messages, ~1MB minimum
-		{3, 3, 1024, 1, 1_000}, // 3-nodes cluster, R=3, 10B messages, ~1MB minimum
 	}
 
 	// All the cases above are run with each of the publisher cases below
@@ -583,11 +575,7 @@ func BenchmarkJetStreamPublish(b *testing.B) {
 								defer s.Shutdown()
 								connectURL = s.ClientURL()
 							} else {
-								cl := createJetStreamClusterExplicit(b, "BENCH_PUB", bc.clusterSize)
-								defer cl.shutdown()
-								cl.waitOnClusterReadyWithNumPeers(bc.clusterSize)
-								cl.waitOnLeader()
-								connectURL = cl.randomServer().ClientURL()
+								panic("cluster size should be 1")
 							}
 
 							nc, err := nats.Connect(connectURL)
@@ -687,7 +675,6 @@ func BenchmarkJetStreamInterestStreamWithLimit(b *testing.B) {
 		replicas    int
 	}{
 		{1, 1}, // Single node, R=1
-		{3, 3}, // 3-nodes cluster, R=3
 	}
 
 	// Parameter: Stream storage type
@@ -727,12 +714,7 @@ func BenchmarkJetStreamInterestStreamWithLimit(b *testing.B) {
 			shutdownFunc = s.Shutdown
 			connectURL = s.ClientURL()
 		} else {
-			cl := createJetStreamClusterExplicit(b, "BENCH_PUB", clusterSize)
-			shutdownFunc = cl.shutdown
-			cl.waitOnClusterReadyWithNumPeers(clusterSize)
-			cl.waitOnLeader()
-			connectURL = cl.randomServer().ClientURL()
-			//connectURL = cl.leader().ClientURL()
+			panic("cluster size should be 1")
 		}
 
 		return connectURL, shutdownFunc
@@ -1048,11 +1030,8 @@ func BenchmarkJetStreamKV(b *testing.B) {
 		numKeys     int
 		valueSize   int
 	}{
-		{1, 1, 1, 100, 100},    // 1 node, 1 bucket with 100 keys, 100B values
-		{1, 1, 10, 1000, 100},  // 1 node, 10 buckets with 1000 keys, 100B values
-		{3, 3, 1, 100, 100},    // 3 nodes, 1 bucket with 100 keys, 100B values
-		{3, 3, 10, 1000, 100},  // 3 nodes, 10 buckets with 1000 keys, 100B values
-		{3, 3, 10, 1000, 1024}, // 3 nodes, 10 buckets with 1000 keys, 1KB values
+		{1, 1, 1, 100, 100},   // 1 node, 1 bucket with 100 keys, 100B values
+		{1, 1, 10, 1000, 100}, // 1 node, 10 buckets with 1000 keys, 100B values
 	}
 
 	workloadCases := []WorkloadType{
@@ -1099,11 +1078,7 @@ func BenchmarkJetStreamKV(b *testing.B) {
 								defer s.Shutdown()
 								connectURL = s.ClientURL()
 							} else {
-								cl := createJetStreamClusterExplicit(b, "BENCH_KV", bc.clusterSize)
-								defer cl.shutdown()
-								cl.waitOnClusterReadyWithNumPeers(bc.clusterSize)
-								cl.waitOnLeader()
-								connectURL = cl.randomServer().ClientURL()
+								panic("cluster size should be 1")
 							}
 
 							nc, js := jsClientConnectURL(b, connectURL)
@@ -1265,7 +1240,7 @@ func BenchmarkJetStreamObjStore(b *testing.B) {
 	}
 
 	var (
-		clusterSizeCases = []int{1, 3}
+		clusterSizeCases = []int{1}
 		rwRatioCases     = []float64{ReadOnly, WriteOnly, 0.8}
 	)
 
@@ -1296,19 +1271,13 @@ func BenchmarkJetStreamObjStore(b *testing.B) {
 										}
 										var (
 											connectURL string
-											cl         *cluster
 										)
 										if clusterSize == 1 {
 											s := RunBasicJetStreamServer(b)
 											defer s.Shutdown()
 											connectURL = s.ClientURL()
 										} else {
-											cl = createJetStreamClusterExplicit(b, "BENCH_OBJ_STORE", clusterSize)
-											defer cl.shutdown()
-											cl.waitOnClusterReadyWithNumPeers(replicas)
-											cl.waitOnLeader()
-											// connect to leader and not replicas
-											connectURL = cl.leader().ClientURL()
+											panic("cluster size should be 1")
 										}
 										nc, js := jsClientConnectURL(b, connectURL)
 										defer nc.Close()
@@ -1325,18 +1294,6 @@ func BenchmarkJetStreamObjStore(b *testing.B) {
 										objStore, err := js.CreateObjectStore(objStoreConfig)
 										if err != nil {
 											b.Fatalf("Error creating ObjectStore: %v", err)
-										}
-
-										// if cluster_size > 1, connect to stream leader
-										if cl != nil {
-											nc.Close()
-											connectURL = cl.streamLeader("$G", fmt.Sprintf("OBJ_%s", objStoreName)).ClientURL()
-											nc, js := jsClientConnectURL(b, connectURL)
-											defer nc.Close()
-											objStore, err = js.ObjectStore(objStoreName)
-											if err != nil {
-												b.Fatalf("Error binding to ObjectStore: %v", err)
-											}
 										}
 
 										// Initialize keys

@@ -3129,6 +3129,17 @@ func (a *Account) traceLabel() string {
 	return a.Name
 }
 
+// Return the subjects for a stream source.
+func (a *Account) streamSourceSubjects(ss *StreamSource, seen map[string]bool) (subjects []string, hasExt bool) {
+	if ss == nil {
+		return nil, false
+	} else if ss.External != nil {
+		return nil, true
+	}
+
+	return a.streamSourceSubjectsNotClustered(ss.Name, seen)
+}
+
 // updateAccountClaimsWithRefresh will update an existing account with new claims.
 // If refreshImportingAccounts is true it will also update incomplete dependent accounts
 // This will replace any exports or imports previously defined.

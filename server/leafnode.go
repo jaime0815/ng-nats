@@ -540,76 +540,59 @@ func (s *Server) connectToRemoteLeafNode(remote *leafNodeCfg, firstConnect bool)
 
 // This will clear any observer state such that stream or consumer assets on this server can become leaders again.
 func (s *Server) clearObserverState(remote *leafNodeCfg) {
-	s.mu.RLock()
-	accName := remote.LocalAccount
-	s.mu.RUnlock()
+	//s.mu.RLock()
+	//accName := remote.LocalAccount
+	//s.mu.RUnlock()
 
-	acc, err := s.LookupAccount(accName)
-	if err != nil {
-		s.Warnf("Error looking up account [%s] checking for JetStream clear observer state on a leafnode", accName)
-		return
-	}
+	//acc, err := s.LookupAccount(accName)
+	//if err != nil {
+	//	s.Warnf("Error looking up account [%s] checking for JetStream clear observer state on a leafnode", accName)
+	//	return
+	//}
 
-	// Walk all streams looking for any clustered stream, skip otherwise.
-	for _, mset := range acc.streams() {
-		node := mset.raftNode()
-		if node == nil {
-			// Not R>1
-			continue
-		}
-		// Check consumers
-		for _, o := range mset.getConsumers() {
-			if n := o.raftNode(); n != nil {
-				// Ensure we can become a leader again.
-				n.SetObserver(false)
-			}
-		}
-		// Ensure we can not become a leader again.
-		node.SetObserver(false)
-	}
 }
 
 // Check to see if we should migrate any assets from this account.
 func (s *Server) checkJetStreamMigrate(remote *leafNodeCfg) {
 	s.mu.RLock()
-	accName, shouldMigrate := remote.LocalAccount, remote.JetStreamClusterMigrate
+	//accName, shouldMigrate := remote.LocalAccount, remote.JetStreamClusterMigrate
 	s.mu.RUnlock()
 
-	if !shouldMigrate {
-		return
-	}
+	//if !shouldMigrate {
+	//	return
+	//}
 
-	acc, err := s.LookupAccount(accName)
-	if err != nil {
-		s.Warnf("Error looking up account [%s] checking for JetStream migration on a leafnode", accName)
-		return
-	}
+	//acc, err := s.LookupAccount(accName)
+	//if err != nil {
+	//	s.Warnf("Error looking up account [%s] checking for JetStream migration on a leafnode", accName)
+	//	return
+	//}
 
-	// Walk all streams looking for any clustered stream, skip otherwise.
-	// If we are the leader force stepdown.
-	for _, mset := range acc.streams() {
-		node := mset.raftNode()
-		if node == nil {
-			// Not R>1
-			continue
-		}
-		// Collect any consumers
-		for _, o := range mset.getConsumers() {
-			if n := o.raftNode(); n != nil {
-				if n.Leader() {
-					n.StepDown()
-				}
-				// Ensure we can not become a leader while in this state.
-				n.SetObserver(true)
-			}
-		}
-		// Stepdown if this stream was leader.
-		if node.Leader() {
-			node.StepDown()
-		}
-		// Ensure we can not become a leader while in this state.
-		node.SetObserver(true)
-	}
+	//// Walk all streams looking for any clustered stream, skip otherwise.
+	//// If we are the leader force stepdown.
+	//for _, mset := range acc.streams() {
+	//	node := mset.raftNode()
+	//	if node == nil {
+	//		// Not R>1
+	//		continue
+	//	}
+	//	// Collect any consumers
+	//	for _, o := range mset.getConsumers() {
+	//		if n := o.raftNode(); n != nil {
+	//			if n.Leader() {
+	//				n.StepDown()
+	//			}
+	//			// Ensure we can not become a leader while in this state.
+	//			n.SetObserver(true)
+	//		}
+	//	}
+	//	// Stepdown if this stream was leader.
+	//	if node.Leader() {
+	//		node.StepDown()
+	//	}
+	//	// Ensure we can not become a leader while in this state.
+	//	node.SetObserver(true)
+	//}
 }
 
 // Helper for checking.
@@ -1292,7 +1275,7 @@ func (s *Server) addLeafNodeConnection(c *client, srvName, clusterName string, c
 	myRemoteDomain := c.leaf.remoteDomain
 	mySrvName := c.leaf.remoteServer
 	myClustName := c.leaf.remoteCluster
-	solicited := c.leaf.remote != nil
+	//solicited := c.leaf.remote != nil
 	c.mu.Unlock()
 
 	var old *client
@@ -1336,13 +1319,13 @@ func (s *Server) addLeafNodeConnection(c *client, srvName, clusterName string, c
 
 	opts := s.getOpts()
 	sysAcc := s.SystemAccount()
-	js := s.getJetStream()
-	var meta *raft
-	if js != nil {
-		if mg := js.getMetaGroup(); mg != nil {
-			meta = mg.(*raft)
-		}
-	}
+	//js := s.getJetStream()
+	//var meta *raft
+	//if js != nil {
+	//	if mg := js.getMetaGroup(); mg != nil {
+	//		meta = mg.(*raft)
+	//	}
+	//}
 	blockMappingOutgoing := false
 	// Deny (non domain) JetStream API traffic unless system account is shared
 	// and domain names are identical and extending is not disabled
@@ -1383,35 +1366,35 @@ func (s *Server) addLeafNodeConnection(c *client, srvName, clusterName string, c
 			c.mergeDenyPermissionsLocked(both, denyAllJs)
 			// When a remote with a system account is present in a server, unless otherwise disabled, the server will be
 			// started in observer mode. Now that it is clear that this not used, turn the observer mode off.
-			if solicited && meta != nil && meta.IsObserver() {
-				meta.setObserver(false, extNotExtended)
-				c.Noticef("Turning JetStream metadata controller Observer Mode off")
-				// Take note that the domain was not extended to avoid this state from startup.
-				writePeerState(js.config.StoreDir, meta.currentPeerState())
-				// Meta controller can't be leader yet.
-				// Yet it is possible that due to observer mode every server already stopped campaigning.
-				// Therefore this server needs to be kicked into campaigning gear explicitly.
-				meta.Campaign()
-			}
+			//if solicited && meta != nil && meta.IsObserver() {
+			//	meta.setObserver(false, extNotExtended)
+			//	c.Noticef("Turning JetStream metadata controller Observer Mode off")
+			//	// Take note that the domain was not extended to avoid this state from startup.
+			//	writePeerState(js.config.StoreDir, meta.currentPeerState())
+			//	// Meta controller can't be leader yet.
+			//	// Yet it is possible that due to observer mode every server already stopped campaigning.
+			//	// Therefore this server needs to be kicked into campaigning gear explicitly.
+			//	meta.Campaign()
+			//}
 		} else {
 			c.Noticef("JetStream Not Extended, adding deny %+v for account %q", denyAllClientJs, accName)
 			c.mergeDenyPermissionsLocked(both, denyAllClientJs)
 		}
 		blockMappingOutgoing = true
 	} else if acc == sysAcc {
-		// system account and same domain
-		s.sys.client.Noticef("Extending JetStream domain %q as System Account connected from server %s",
-			myRemoteDomain, srvDecorated())
-		// In an extension use case, pin leadership to server remotes connect to.
-		// Therefore, server with a remote that are not already in observer mode, need to be put into it.
-		if solicited && meta != nil && !meta.IsObserver() {
-			meta.setObserver(true, extExtended)
-			c.Noticef("Turning JetStream metadata controller Observer Mode on - System Account Connected")
-			// Take note that the domain was not extended to avoid this state next startup.
-			writePeerState(js.config.StoreDir, meta.currentPeerState())
-			// If this server is the leader already, step down so a new leader can be elected (that is not an observer)
-			meta.StepDown()
-		}
+		//// system account and same domain
+		//s.sys.client.Noticef("Extending JetStream domain %q as System Account connected from server %s",
+		//	myRemoteDomain, srvDecorated())
+		//// In an extension use case, pin leadership to server remotes connect to.
+		//// Therefore, server with a remote that are not already in observer mode, need to be put into it.
+		//if solicited && meta != nil && !meta.IsObserver() {
+		//	meta.setObserver(true, extExtended)
+		//	c.Noticef("Turning JetStream metadata controller Observer Mode on - System Account Connected")
+		//	// Take note that the domain was not extended to avoid this state next startup.
+		//	writePeerState(js.config.StoreDir, meta.currentPeerState())
+		//	// If this server is the leader already, step down so a new leader can be elected (that is not an observer)
+		//	meta.StepDown()
+		//}
 	} else {
 		// This deny is needed in all cases (system account shared or not)
 		// If the system account is shared, jsAllAPI traffic will go through the system account.

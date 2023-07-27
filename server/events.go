@@ -31,6 +31,7 @@ import (
 
 	"github.com/klauspost/compress/s2"
 	"github.com/nats-io/jwt/v2"
+
 	"github.com/nats-io/nats-server/v2/server/pse"
 )
 
@@ -769,29 +770,6 @@ func (s *Server) sendStatsz(subj string) {
 			ni.tags = copyStrings(s.opts.Tags)
 			s.optsMu.RUnlock()
 			s.nodeToInfo.Store(ourNode, ni)
-		}
-		// Metagroup info.
-		if mg := js.getMetaGroup(); mg != nil {
-			if mg.Leader() {
-				if ci := s.raftNodeToClusterInfo(mg); ci != nil {
-					jStat.Meta = &MetaClusterInfo{
-						Name:     ci.Name,
-						Leader:   ci.Leader,
-						Peer:     getHash(ci.Leader),
-						Replicas: ci.Replicas,
-						Size:     mg.ClusterSize(),
-					}
-				}
-			} else {
-				// non leader only include a shortened version without peers
-				leader := s.serverNameForNode(mg.GroupLeader())
-				jStat.Meta = &MetaClusterInfo{
-					Name:   mg.Group(),
-					Leader: leader,
-					Peer:   getHash(leader),
-					Size:   mg.ClusterSize(),
-				}
-			}
 		}
 		m.Stats.JetStream = jStat
 		s.mu.RLock()

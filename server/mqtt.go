@@ -1098,9 +1098,6 @@ func (s *Server) mqttCreateAccountSessionManager(acc *Account, quitCh chan struc
 			return si, nil
 		}
 		sr := 1
-		if si.Cluster != nil {
-			sr += len(si.Cluster.Replicas)
-		}
 		if replicas != sr {
 			s.Warnf("MQTT %s stream replicas mismatch: current is %v but configuration is %v for '%s > %s'",
 				txt, sr, replicas, accName, stream)
@@ -1226,28 +1223,7 @@ func (s *Server) mqttCreateAccountSessionManager(acc *Account, quitCh chan struc
 }
 
 func (s *Server) mqttDetermineReplicas() int {
-	// If not clustered, then replica will be 1.
-	if !s.JetStreamIsClustered() {
-		return 1
-	}
-	opts := s.getOpts()
-	replicas := 0
-	for _, u := range opts.Routes {
-		host := u.Hostname()
-		// If this is an IP just add one.
-		if net.ParseIP(host) != nil {
-			replicas++
-		} else {
-			addrs, _ := net.LookupHost(host)
-			replicas += len(addrs)
-		}
-	}
-	if replicas < 1 {
-		replicas = 1
-	} else if replicas > 3 {
-		replicas = 3
-	}
-	return replicas
+	return 1
 }
 
 //////////////////////////////////////////////////////////////////////////////
